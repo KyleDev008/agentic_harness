@@ -1,0 +1,15 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - build/**
+  errors:
+    avoid_relative_lib_imports: warning
+    invalid_dependency: error
+
+linter:
+  rules:
+    avoid_relative_lib_imports: true
+    prefer_final_in_for_each: true
+    prefer_final_locals: true
+    prefer_const_constructors: true

@@ -1,0 +1,25 @@
+name: agentic_harness
+description: >-
+  Pure Dart agent harness: a native tool-use loop over OpenAI-compatible,
+  Anthropic, Ollama and Gemini models, with tools, permissions and one event
+  stream.
+version: 1.0.0
+repository: https://github.com/KyleDev008/agentic_harness
+issue_tracker: https://github.com/KyleDev008/agentic_harness/issues
+topics:
+  - ai
+  - llm
+  - agents
+  - anthropic
+  - openai
+
+environment:
+  sdk: ^3.7.0
+
+dependencies:
+  http: ^1.5.0
+  path: ^1.9.0
+
+dev_dependencies:
+  lints: ^5.1.0
+  test: ^1.25.0
