@@ -70,6 +70,9 @@ class AskUserTool extends HarnessTool {
   ToolAnnotations get annotations => ToolAnnotations.readOnlyLocal;
 
   @override
+  bool get replayable => true;
+
+  @override
   String displayLabel(Map<String, Object?> input) => 'Waiting for your answer…';
 
   @override
@@ -132,6 +135,16 @@ final class Todo {
   final String content;
   final TodoStatus status;
   const Todo({required this.id, required this.content, required this.status});
+
+  factory Todo.fromJson(Map<String, Object?> json) => Todo(
+    id: '${json['id'] ?? ''}',
+    content: '${json['content'] ?? ''}',
+    status: switch (json['status']) {
+      'in_progress' => TodoStatus.inProgress,
+      'completed' => TodoStatus.completed,
+      _ => TodoStatus.pending,
+    },
+  );
 
   Map<String, Object?> toJson() => {
     'id': id,

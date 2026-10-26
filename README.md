@@ -7,14 +7,20 @@ The core has no `dart:io` and no Flutter dependency, so it runs in Flutter apps 
 ## Features
 
 - **Native tool-use loop.** Read-only calls run in parallel; others run in order. Every tool call gets exactly one result, including unknown tools, invalid input, denials, timeouts and repeated identical calls, so the model can always recover.
-- **Model clients:** OpenAI-compatible (OpenAI, Azure, OpenRouter, LM Studio, vLLM), Anthropic (thinking, prompt caching), Ollama (native API, capability probing), Gemini (thought signatures, thinking levels), plus `PromptedToolCallingClient` to add tool calling to models without it.
+- **Model clients:** OpenAI-compatible (OpenAI, Azure, OpenRouter, LM Studio, vLLM), OpenAI Responses (reasoning carried across tool calls), Anthropic (thinking, prompt caching), Ollama (native API, capability probing), Gemini (thought signatures, thinking levels), plus `PromptedToolCallingClient` to add tool calling to models without it.
 - **JSON Schema tools** with input validation and type coercion, tool annotations (read-only, destructive, idempotent, open-world), separate model-facing and host-facing output.
 - **Permissions and hooks:** allow/deny/ask rules, modes, a fail-closed `canUseTool` callback, and pre/post tool-use hooks.
-- **Limits:** turn, token and wall-clock budgets, per-tool timeouts, cancellation that aborts the HTTP request.
-- **Context management:** compaction calibrated against the provider's reported usage, which never separates a tool use from its result.
+- **Durable runs:** an interruptible run stops at an approval or question and returns a JSON-serializable state to resume later, even after a restart; per-turn checkpoints for crash recovery.
+- **Tracing and cost:** OpenTelemetry-style spans for runs, model calls, tools and subagents (OTLP/HTTP exporter included), and cost from your own price table with a cost budget.
+- **Limits:** turn, token, cost and wall-clock budgets, per-tool timeouts, cancellation that aborts the HTTP request.
+- **Context management:** compaction calibrated against the provider's reported usage, which never separates a tool use from its result, or Anthropic's server-side compaction and clearing.
 - **Structured output** validated against a JSON Schema, with one repair attempt.
-- **Built-in tools:** `ask_user` (questions, choices, multi-field forms), `todo_write`, and subagents as tools.
-- **Hardened IO tools** (`io_tools.dart`): a symlink-safe workspace filesystem, git with a subcommand allow-list, shell-free terminal and build/test runners, and HTTP with an SSRF guard.
+- **MCP client:** use any Model Context Protocol server's tools over Streamable HTTP or stdio, with automatic fallback for servers on older protocol versions. Server annotations are untrusted by default.
+- **Tool search:** defer large tool catalogues (e.g. MCP servers) behind a `search_tools` tool that loads matching tools on demand.
+- **Skills:** instruction bundles (from code or `SKILL.md` folders) that the model loads on demand from a short index.
+- **Multi-agent:** handoffs that pass the conversation to another agent, and subagents that work in the foreground or the background, with depth, concurrency and shared cost limits.
+- **Built-in tools:** `ask_user` (questions, choices, multi-field forms), `todo_write`, a `memory` tool (Claude's native memory tool on Anthropic), and subagents as tools.
+- **Hardened IO tools** (`io_tools.dart`): a symlink-safe workspace filesystem, git with a subcommand allow-list, shell-free terminal and build/test runners, and HTTP with an SSRF guard; run them locally or in a Docker sandbox (non-root, no network, resource-limited; it shares the host kernel and can change the mounted folder) or your own `Sandbox`.
 - **Testing:** `FakeModelClient` plays scripted turns and records every request.
 
 ## Install
@@ -98,6 +104,10 @@ final agent = AgentSpec(
 
 - [Usage guide](doc/guide.md): the loop, clients, tools, permissions, context, events and testing.
 - [Example](example/main.dart): a console agent with a permission prompt. It runs offline with a scripted model, or against Anthropic or OpenAI when an API key is set.
+
+## Versioning
+
+New `StopReason` values and new `RunEvent` types only arrive in major versions, so a `switch` that lists every case keeps compiling across minor updates. Other enums and classes may grow in minor versions.
 
 ## License
 

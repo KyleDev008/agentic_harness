@@ -185,6 +185,112 @@ void main() {
       },
     );
 
+    group('structured output', () {
+      const schema = {
+        'type': 'object',
+        'properties': {
+          'n': {'type': 'integer', 'minimum': 1, 'maximum': 9},
+          'tags': {
+            'type': 'array',
+            'minItems': 3,
+            'maxItems': 5,
+            'items': {'type': 'string', 'maxLength': 10, 'format': 'color'},
+          },
+          'when': {'type': 'string', 'format': 'date'},
+          'kind': {
+            'oneOf': [
+              {'type': 'string'},
+              {
+                'type': 'object',
+                'properties': {
+                  'x': {'type': 'number'},
+                },
+                'additionalProperties': {'type': 'string'},
+              },
+            ],
+          },
+        },
+        'required': ['n'],
+      };
+      const request = ModelRequest(
+        system: 's',
+        messages: [
+          AgentMessage(role: Role.user, content: [TextBlock('hi')]),
+        ],
+        outputSchema: schema,
+      );
+
+      test('current models send a sanitized output_config.format', () {
+        final client = AnthropicClient(
+          const AnthropicConfig(
+            model: 'claude-opus-5-5',
+            apiKey: 'k',
+            effort: 'high',
+          ),
+        );
+        expect(client.capabilities.structuredOutput, isTrue);
+        final body = client.buildBody(request);
+        final config = body['output_config'] as Map;
+        expect(config['effort'], 'high');
+        expect(config['format'], {
+          'type': 'json_schema',
+          'schema': {
+            'type': 'object',
+            'properties': {
+              'n': {'type': 'integer'},
+              'tags': {
+                'type': 'array',
+                'minItems': 1,
+                'items': {'type': 'string'},
+              },
+              'when': {'type': 'string', 'format': 'date'},
+              'kind': {
+                'anyOf': [
+                  {'type': 'string'},
+                  {
+                    'type': 'object',
+                    'properties': {
+                      'x': {'type': 'number'},
+                    },
+                    'additionalProperties': false,
+                  },
+                ],
+              },
+            },
+            'required': ['n'],
+            'additionalProperties': false,
+          },
+        });
+        final system = (body['system'] as List).single['text'] as String;
+        expect(system, 's');
+      });
+
+      test('older models get the prompt instruction instead', () {
+        for (final model in [
+          'claude-3-7-sonnet-latest',
+          'claude-sonnet-4-20250514',
+          'claude-opus-4-0',
+        ]) {
+          final client = AnthropicClient(
+            AnthropicConfig(model: model, apiKey: 'k'),
+          );
+          expect(client.capabilities.structuredOutput, isFalse, reason: model);
+          final body = client.buildBody(request);
+          expect(body.containsKey('output_config'), isFalse, reason: model);
+          final system = (body['system'] as List).single['text'] as String;
+          expect(system, contains('JSON Schema'));
+        }
+        expect(
+          const AnthropicConfig(
+            model: 'claude-3-7-sonnet-latest',
+            apiKey: 'k',
+            nativeStructuredOutput: true,
+          ).structuredOutputSupported,
+          isTrue,
+        );
+      });
+    });
+
     test(
       'tool_choice none keeps tool definitions; redacted thinking is replayed',
       () {

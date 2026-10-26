@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../core/cancellation.dart';
 import '../core/message.dart';
+import '../core/usage.dart';
 import '../model/model_client.dart';
 
 /// When and how the working context is reduced.
@@ -42,6 +43,10 @@ final class ContextPolicy {
 class ContextManager {
   final ContextPolicy policy;
   double _calibration = 1.0;
+  bool _calibrated = false;
+
+  /// Whether an estimate has been checked against reported usage yet.
+  bool get calibrated => _calibrated;
   int? _lastEstimate;
 
   ContextManager(this.policy);
@@ -97,13 +102,17 @@ class ContextManager {
     if (last == null || last <= 0 || reportedInputTokens <= 0) return;
     final ratio = reportedInputTokens / last;
     // Ignore implausible ratios (e.g. a server reporting cached-only counts).
-    if (ratio > 0.25 && ratio < 4) _calibration = ratio;
+    if (ratio > 0.25 && ratio < 4) {
+      _calibration = ratio;
+      _calibrated = true;
+    }
   }
 
   /// Returns a compacted copy of [messages] that fits [contextWindow] after
   /// reserving [outputReserve] tokens, or `null` when nothing was needed.
   ///
-  /// [summarizer] is used only when `policy.summarize` is on.
+  /// [summarizer] is used only when `policy.summarize` is on; its usage
+  /// goes to [onUsage].
   Future<CompactionResult?> compact({
     required String? system,
     required List<AgentMessage> messages,
@@ -112,6 +121,7 @@ class ContextManager {
     required int outputReserve,
     ModelClient? summarizer,
     CancelToken? cancel,
+    void Function(Usage usage)? onUsage,
   }) async {
     if (!policy.enabled) return null;
     final window = contextWindow ?? policy.fallbackContextWindow;
@@ -150,6 +160,7 @@ class ContextManager {
           summarizer,
           working.sublist(0, split),
           cancel,
+          onUsage,
         );
         if (summary != null && summary.trim().isNotEmpty) {
           working = [
@@ -256,10 +267,14 @@ class ContextManager {
     return changed ? out : null;
   }
 
+  /// Output limit of the summarizing call.
+  static const summaryMaxOutputTokens = 1024;
+
   static Future<String?> _summarize(
     ModelClient model,
     List<AgentMessage> older,
     CancelToken? cancel,
+    void Function(Usage usage)? onUsage,
   ) async {
     final transcript = StringBuffer();
     for (final m in older) {
@@ -283,11 +298,12 @@ class ContextManager {
               'conversation below that preserves user goals, decisions, '
               'facts, ids and open tasks. Output only the summary.',
           messages: [AgentMessage.user(transcript.toString())],
-          maxOutputTokens: 1024,
+          maxOutputTokens: summaryMaxOutputTokens,
         ),
         cancel: cancel,
       )) {
         if (event is TextDeltaEvent) buffer.write(event.text);
+        if (event is UsageReport) onUsage?.call(event.usage);
       }
     } catch (_) {
       return null; // fall through to truncation

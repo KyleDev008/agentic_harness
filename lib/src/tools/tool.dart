@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../core/cancellation.dart';
+import '../telemetry/telemetry.dart';
 import '../core/message.dart';
 
 /// Behavioural hints about a tool call (aligned with MCP tool annotations).
@@ -188,6 +189,11 @@ final class ToolContext {
   /// Mutable state shared by every tool in the run (e.g. the todo list).
   final Map<String, Object?> runState;
 
+  /// The run's tracer, pricing and this call's span, for tools that start
+  /// runs of their own ([HarnessTool.startsRuns]); pass it to
+  /// `Runner.run(telemetry:)`. Null for other tools.
+  final RunTelemetry? telemetry;
+
   const ToolContext({
     required this.cancel,
     required this.runId,
@@ -195,6 +201,7 @@ final class ToolContext {
     required this.progress,
     required this.requestUserInput,
     required this.runState,
+    this.telemetry,
   });
 }
 
@@ -234,6 +241,32 @@ abstract class HarnessTool {
   /// Model-facing output cap (characters); longer output keeps its head and
   /// tail with a truncation note.
   int get maxOutputChars => 24000;
+
+  /// The call can be re-run from the start with its earlier answers to
+  /// [ToolContext.requestUserInput] replayed, because nothing it does
+  /// before a question has side effects. In an interruptible run
+  /// (`RunConfig.interruptible`) such a tool's questions stop the run
+  /// instead of waiting; other tools' questions wait as usual.
+  bool get replayable => false;
+
+  /// An Anthropic-defined tool type (for example `memory_20250818`) that
+  /// `AnthropicClient` declares instead of [inputSchema], so the model uses
+  /// the tool it was trained on. Other clients use the schema.
+  String? get anthropicType => null;
+
+  /// Whether a successful read-only, local call brings private data into
+  /// the run (see `ToolCallRequest.afterPrivateRead`). True by default;
+  /// tools that read only host-provided content (skills, handoffs) say no.
+  bool get readsPrivateData => true;
+
+  /// Kept out of the prompt until the model finds it with `search_tools`
+  /// (see `DeferredTools`).
+  bool get deferLoading => false;
+
+  /// The tool starts agent runs of its own (like `SubagentTool`), so it
+  /// gets the run's tracer, pricing and cost hook in
+  /// [ToolContext.telemetry]. Other tools get null.
+  bool get startsRuns => false;
 
   Future<ToolOutput> call(Map<String, Object?> input, ToolContext context);
 }

@@ -280,13 +280,16 @@ class HttpTransport {
     if (_ownsClient) _client.close();
   }
 
+  /// Loopback or a private IPv4 address (LAN servers such as LM Studio).
+  /// Only literal addresses count: `10.example.com` is not local.
   static bool _isLocalHost(String host) =>
       host == 'localhost' ||
-      host == '127.0.0.1' ||
       host == '::1' ||
       host == '[::1]' ||
-      host.startsWith('192.168.') ||
-      host.startsWith('10.');
+      RegExp(
+        r'^(127\.\d{1,3}|10\.\d{1,3}|192\.168|172\.(1[6-9]|2\d|3[01]))'
+        r'\.\d{1,3}\.\d{1,3}$',
+      ).hasMatch(host);
 
   Future<void> _sleep(Duration delay, CancelToken? cancel) async {
     if (cancel == null) {

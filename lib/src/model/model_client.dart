@@ -85,10 +85,14 @@ final class ToolDefinition {
   /// JSON Schema for the tool input; must be an `object` schema.
   final Map<String, Object?> inputSchema;
 
+  /// See `HarnessTool.anthropicType`.
+  final String? anthropicType;
+
   const ToolDefinition({
     required this.name,
     required this.description,
     required this.inputSchema,
+    this.anthropicType,
   });
 }
 
@@ -126,6 +130,14 @@ final class ModelCapabilities {
   /// Maximum concurrent requests (1 for on-device models).
   final int maxConcurrency;
 
+  /// The provider compacts the context itself, so the runner's
+  /// `ContextPolicy` compaction is skipped.
+  final bool serverCompaction;
+
+  /// The output-token limit the client sends when a request sets none.
+  /// The runner caps budgeted calls at most to this.
+  final int? maxOutputTokens;
+
   const ModelCapabilities({
     this.nativeTools = true,
     this.parallelToolCalls = true,
@@ -137,6 +149,8 @@ final class ModelCapabilities {
     this.reportsUsage = true,
     this.contextWindow,
     this.maxConcurrency = 8,
+    this.serverCompaction = false,
+    this.maxOutputTokens,
   });
 
   ModelCapabilities copyWith({
@@ -144,6 +158,8 @@ final class ModelCapabilities {
     bool? parallelToolCalls,
     int? contextWindow,
     bool? structuredOutput,
+    bool? serverCompaction,
+    int? maxOutputTokens,
   }) => ModelCapabilities(
     nativeTools: nativeTools ?? this.nativeTools,
     parallelToolCalls: parallelToolCalls ?? this.parallelToolCalls,
@@ -155,8 +171,16 @@ final class ModelCapabilities {
     reportsUsage: reportsUsage,
     contextWindow: contextWindow ?? this.contextWindow,
     maxConcurrency: maxConcurrency,
+    serverCompaction: serverCompaction ?? this.serverCompaction,
+    maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
   );
 }
+
+/// `AgentMessage.providerMetadata` key under which a client stores a
+/// server-side compaction of the history before that message:
+/// `{'summary': String, 'tokensBefore': int}`. The client that wrote it
+/// sends only the history from that message on.
+const compactionMetadataKey = 'compaction';
 
 /// Why the model stopped generating.
 enum ModelStopReason { endTurn, toolUse, maxTokens, stopSequence, refusal }

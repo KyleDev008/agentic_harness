@@ -215,13 +215,22 @@ final class UserInputRequested extends RunEvent {
 final class UsageUpdated extends RunEvent {
   final Usage call;
   final Usage total;
-  UsageUpdated(super.runId, {required this.call, required this.total});
+
+  /// The run's cost so far in US dollars, when priced.
+  final double? cost;
+  UsageUpdated(
+    super.runId, {
+    required this.call,
+    required this.total,
+    this.cost,
+  });
   @override
   String get type => 'usage';
   @override
   Map<String, Object?> _fields() => {
     'call': call.toJson(),
     'total': total.toJson(),
+    if (cost != null) 'cost': cost,
   };
 }
 
@@ -286,6 +295,53 @@ final class RunError extends RunEvent {
   };
 }
 
+/// The conversation passed to another agent (`Handoff`).
+final class HandoffOccurred extends RunEvent {
+  final String from;
+  final String to;
+  HandoffOccurred(super.runId, {required this.from, required this.to});
+  @override
+  String get type => 'handoff';
+  @override
+  Map<String, Object?> _fields() => {'from': from, 'to': to};
+}
+
+/// A background task (for example a background subagent) started.
+final class BackgroundTaskStarted extends RunEvent {
+  final String taskId;
+  final String label;
+  BackgroundTaskStarted(
+    super.runId, {
+    required this.taskId,
+    required this.label,
+  });
+  @override
+  String get type => 'background_task_started';
+  @override
+  Map<String, Object?> _fields() => {'taskId': taskId, 'label': label};
+}
+
+/// A background task finished; its result reaches the model as a message.
+final class BackgroundTaskFinished extends RunEvent {
+  final String taskId;
+  final String label;
+  final bool failed;
+  BackgroundTaskFinished(
+    super.runId, {
+    required this.taskId,
+    required this.label,
+    this.failed = false,
+  });
+  @override
+  String get type => 'background_task_finished';
+  @override
+  Map<String, Object?> _fields() => {
+    'taskId': taskId,
+    'label': label,
+    if (failed) 'failed': true,
+  };
+}
+
 /// Why a run ended.
 enum StopReason {
   /// The model finished its answer.
@@ -302,6 +358,10 @@ enum StopReason {
   /// The model declined (safety refusal).
   refusal,
   error,
+
+  /// An interruptible run stopped for an approval or a question; resume it
+  /// from `RunResult.state`.
+  interrupted,
 }
 
 /// Always the last event.

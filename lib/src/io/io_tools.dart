@@ -9,6 +9,7 @@ import '../core/message.dart';
 import '../tools/tool.dart';
 import 'net_guard.dart';
 import 'process_runner.dart';
+import 'sandbox.dart';
 import 'workspace.dart';
 
 // ── File system ──────────────────────────────────────────────────────────
@@ -17,17 +18,22 @@ import 'workspace.dart';
 ///
 /// Paths are workspace-relative and resolved through symlinks; nothing
 /// outside the root (or inside `.git` for writes) is reachable. Reads are
-/// capped at [maxReadBytes].
+/// capped at [maxReadBytes]. Give a [workspaceRoot] folder, or a [sandbox].
 class FileSystemTool extends HarnessTool {
-  final Workspace workspace;
+  final Sandbox sandbox;
   final int maxReadBytes;
   final bool allowWrites;
 
   FileSystemTool({
-    required String workspaceRoot,
+    String? workspaceRoot,
+    Sandbox? sandbox,
     this.maxReadBytes = 256 * 1024,
     this.allowWrites = true,
-  }) : workspace = Workspace(workspaceRoot);
+  }) : sandbox = _sandbox(workspaceRoot, sandbox);
+
+  /// The workspace folder (local and Docker sandboxes only).
+  @Deprecated('Use sandbox')
+  Workspace get workspace => _workspaceOf(sandbox);
 
   @override
   String get name => 'file_system';
@@ -85,79 +91,55 @@ class FileSystemTool extends HarnessTool {
     try {
       switch (action) {
         case 'read':
-          final path = await workspace.resolve(rel);
-          if (isSensitivePath(await workspace.display(path))) {
+          final path = await sandbox.resolve(rel);
+          if (isSensitivePath(path)) {
             return ToolOutput.error(
               'Reading $rel is blocked: it may contain credentials or keys.',
             );
           }
-          final file = File(path);
-          if (!await file.exists()) {
+          if (await sandbox.typeOf(path) != SandboxEntryType.file) {
             return ToolOutput.error('File not found: $rel');
           }
-          final length = await file.length();
-          final raf = await file.open();
-          try {
-            final bytes = await raf.read(
-              length > maxReadBytes ? maxReadBytes : length,
-            );
-            final text = utf8.decode(bytes, allowMalformed: true);
-            return ToolOutput.text(
-              length > maxReadBytes
-                  ? '$text\n\n[file truncated: showing $maxReadBytes of $length bytes]'
-                  : text,
-            );
-          } finally {
-            await raf.close();
-          }
+          final length = await sandbox.length(path);
+          final bytes = await sandbox.read(path, maxBytes: maxReadBytes);
+          final text = utf8.decode(bytes, allowMalformed: true);
+          return ToolOutput.text(
+            length > maxReadBytes
+                ? '$text\n\n[file truncated: showing $maxReadBytes of $length bytes]'
+                : text,
+          );
         case 'list':
-          final path = await workspace.resolve(rel);
-          final dir = Directory(path);
-          if (!await dir.exists()) {
+          final path = await sandbox.resolve(rel);
+          if (await sandbox.typeOf(path) != SandboxEntryType.directory) {
             return ToolOutput.error('Directory not found: $rel');
           }
-          final entries = <String>[];
-          await for (final entity in dir.list(followLinks: false)) {
-            final name = p.basename(entity.path);
-            entries.add(entity is Directory ? '$name/' : name);
-            if (entries.length >= 500) {
-              entries.add('… (listing truncated)');
-              break;
-            }
-          }
-          entries.sort();
+          final listed = await sandbox.list(path, limit: 501);
+          final entries = [
+            for (final e in listed.take(500))
+              e.type == SandboxEntryType.directory ? '${e.name}/' : e.name,
+            if (listed.length > 500) '… (listing truncated)',
+          ];
           return ToolOutput.text(
             entries.isEmpty ? '(empty)' : entries.join('\n'),
           );
         case 'write':
           if (!allowWrites) return ToolOutput.error('Writing is disabled.');
           if (rel.trim().isEmpty) return ToolOutput.error('path is required');
-          final path = await workspace.resolve(rel, forWrite: true);
-          final content = '${input['content'] ?? ''}';
-          final file = File(path);
-          await file.parent.create(recursive: true);
-          await file.writeAsString(content, flush: true);
-          return ToolOutput.text(
-            'Wrote ${utf8.encode(content).length} bytes to $rel.',
-          );
+          final path = await sandbox.resolve(rel, forWrite: true);
+          final content = utf8.encode('${input['content'] ?? ''}');
+          await sandbox.write(path, content);
+          return ToolOutput.text('Wrote ${content.length} bytes to $rel.');
         case 'delete':
           if (!allowWrites) return ToolOutput.error('Deleting is disabled.');
           if (rel.trim().isEmpty) return ToolOutput.error('path is required');
-          final path = await workspace.resolve(rel, forWrite: true);
-          if (p.equals(path, await workspace.canonicalRoot())) {
+          final path = await sandbox.resolve(rel, forWrite: true);
+          if (path.isEmpty) {
             return ToolOutput.error('Refusing to delete the workspace root.');
           }
-          final type = await FileSystemEntity.type(path, followLinks: false);
-          if (type == FileSystemEntityType.notFound) {
+          if (await sandbox.typeOf(path) == SandboxEntryType.notFound) {
             return ToolOutput.error('Not found: $rel');
           }
-          if (type == FileSystemEntityType.directory) {
-            await Directory(path).delete(); // non-recursive by design
-          } else if (type == FileSystemEntityType.link) {
-            await Link(path).delete();
-          } else {
-            await File(path).delete();
-          }
+          await sandbox.delete(path);
           return ToolOutput.text('Deleted $rel.');
         default:
           return ToolOutput.error('Unknown action "$action".');
@@ -177,8 +159,18 @@ class FileSystemTool extends HarnessTool {
 /// (or git internals, which can hold tokens in remote URLs). Such files are
 /// never read into a model context.
 bool isSensitivePath(String path) {
+  // `.env::$DATA`, `.env.` and `.env ` all name `.env` on Windows.
   final segments =
-      p.split(path.replaceAll('\\', '/')).map((s) => s.toLowerCase()).toList();
+      p
+          .split(path.replaceAll('\\', '/'))
+          .map(
+            (s) => s
+                .toLowerCase()
+                .split(':')
+                .first
+                .replaceFirst(RegExp(r'[. ]+$'), ''),
+          )
+          .toList();
   const dirs = {'.git', '.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker'};
   if (segments.any(dirs.contains)) return true;
   final name = segments.isEmpty ? '' : segments.last;
@@ -225,13 +217,18 @@ bool isSensitivePath(String path) {
 /// `--git-dir`, `--output`, …) are rejected; hooks and fsmonitor are
 /// disabled for every invocation.
 class GitTool extends HarnessTool {
-  final Workspace workspace;
+  final Sandbox sandbox;
   final Duration commandTimeout;
 
   GitTool({
-    required String workspaceRoot,
+    String? workspaceRoot,
+    Sandbox? sandbox,
     this.commandTimeout = const Duration(minutes: 2),
-  }) : workspace = Workspace(workspaceRoot);
+  }) : sandbox = _sandbox(workspaceRoot, sandbox);
+
+  /// The workspace folder (local and Docker sandboxes only).
+  @Deprecated('Use sandbox')
+  Workspace get workspace => _workspaceOf(sandbox);
 
   static const readOnlyCommands = {
     'status',
@@ -528,7 +525,7 @@ class GitTool extends HarnessTool {
     Map<String, Object?> input,
     ToolContext context,
   ) async {
-    if (!processesSupported) {
+    if (!sandbox.canRunProcesses) {
       return ToolOutput.error('git is not available on this device.');
     }
     final command = '${input['command']}'.trim();
@@ -545,12 +542,12 @@ class GitTool extends HarnessTool {
     if (command == 'commit' && message is String && message.isNotEmpty) {
       args.addAll(['-m', message]);
     }
-    final root = await workspace.canonicalRoot();
+    final noHooks = await sandbox.pathInside('.agent-harness-no-hooks');
     try {
-      final out = await runProcess(
+      final out = await sandbox.run(
         'git',
         [
-          '-c', 'core.hooksPath=${p.join(root, '.agent-harness-no-hooks')}',
+          '-c', 'core.hooksPath=$noHooks',
           '-c', 'core.fsmonitor=false',
           // No transports that run programs or read arbitrary local paths.
           '-c', 'protocol.ext.allow=never',
@@ -559,7 +556,6 @@ class GitTool extends HarnessTool {
           command,
           ...args,
         ],
-        workingDirectory: root,
         timeout: commandTimeout,
         cancel: context.cancel,
         environment: const {'GIT_TERMINAL_PROMPT': '0'},
@@ -581,15 +577,20 @@ class GitTool extends HarnessTool {
 /// [allowedExecutables] restricts which programs may run (null = any).
 /// Always classified destructive, so the standard policy asks the user.
 class TerminalTool extends HarnessTool {
-  final Workspace workspace;
+  final Sandbox sandbox;
   final Set<String>? allowedExecutables;
   final Duration commandTimeout;
 
   TerminalTool({
-    required String workspaceRoot,
+    String? workspaceRoot,
+    Sandbox? sandbox,
     this.allowedExecutables,
     this.commandTimeout = const Duration(minutes: 2),
-  }) : workspace = Workspace(workspaceRoot);
+  }) : sandbox = _sandbox(workspaceRoot, sandbox);
+
+  /// The workspace folder (local and Docker sandboxes only).
+  @Deprecated('Use sandbox')
+  Workspace get workspace => _workspaceOf(sandbox);
 
   @override
   String get name => 'terminal';
@@ -629,7 +630,7 @@ class TerminalTool extends HarnessTool {
   Future<ToolOutput> call(Map<String, Object?> input, ToolContext context) =>
       _runCommand(
         this,
-        workspace,
+        sandbox,
         input,
         context,
         allowedExecutables,
@@ -641,7 +642,7 @@ class TerminalTool extends HarnessTool {
 /// workspace without a shell. Classified destructive: build scripts can
 /// run arbitrary code, so the standard policy asks the user.
 class BuildTestTool extends HarnessTool {
-  final Workspace workspace;
+  final Sandbox sandbox;
   final Set<String> allowedExecutables;
   final Duration commandTimeout;
 
@@ -668,10 +669,15 @@ class BuildTestTool extends HarnessTool {
   };
 
   BuildTestTool({
-    required String workspaceRoot,
+    String? workspaceRoot,
+    Sandbox? sandbox,
     this.allowedExecutables = defaultExecutables,
     this.commandTimeout = const Duration(minutes: 10),
-  }) : workspace = Workspace(workspaceRoot);
+  }) : sandbox = _sandbox(workspaceRoot, sandbox);
+
+  /// The workspace folder (local and Docker sandboxes only).
+  @Deprecated('Use sandbox')
+  Workspace get workspace => _workspaceOf(sandbox);
 
   @override
   String get name => 'build_test';
@@ -710,7 +716,7 @@ class BuildTestTool extends HarnessTool {
   Future<ToolOutput> call(Map<String, Object?> input, ToolContext context) =>
       _runCommand(
         this,
-        workspace,
+        sandbox,
         input,
         context,
         allowedExecutables,
@@ -718,15 +724,31 @@ class BuildTestTool extends HarnessTool {
       );
 }
 
+/// The host folder behind [sandbox], for the deprecated `workspace`
+/// getters.
+Workspace _workspaceOf(Sandbox sandbox) => switch (sandbox) {
+  LocalSandbox(:final workspace) => workspace,
+  DockerSandbox(:final hostWorkspace) => hostWorkspace,
+  _ => throw StateError('${sandbox.description} has no local workspace'),
+};
+
+/// The sandbox for a tool given either a folder or a sandbox.
+Sandbox _sandbox(String? workspaceRoot, Sandbox? sandbox) {
+  if ((workspaceRoot == null) == (sandbox == null)) {
+    throw ArgumentError('Give either workspaceRoot or sandbox');
+  }
+  return sandbox ?? LocalSandbox(workspaceRoot!);
+}
+
 Future<ToolOutput> _runCommand(
   HarnessTool tool,
-  Workspace workspace,
+  Sandbox sandbox,
   Map<String, Object?> input,
   ToolContext context,
   Set<String>? allowed,
   Duration timeout,
 ) async {
-  if (!processesSupported) {
+  if (!sandbox.canRunProcesses) {
     return ToolOutput.error('${tool.name} is not available on this device.');
   }
   var command = '${input['command']}'.trim();
@@ -760,8 +782,8 @@ Future<ToolOutput> _runCommand(
     );
   }
   try {
-    final dir = await workspace.resolve('${input['working_directory'] ?? ''}');
-    final out = await runProcess(
+    final dir = await sandbox.resolve('${input['working_directory'] ?? ''}');
+    final out = await sandbox.run(
       command,
       args,
       workingDirectory: dir,

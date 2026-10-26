@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 
 import '../core/cancellation.dart';
 import '../core/errors.dart';
@@ -7,6 +8,82 @@ import '../core/usage.dart';
 import '../model/http_transport.dart';
 import '../model/model_client.dart';
 import '../model/tool_call_accumulator.dart';
+
+/// Server-side compaction (`compact_20260112`, beta): when the prompt
+/// reaches [triggerTokens], the API summarizes the earlier conversation and
+/// continues from the summary.
+final class AnthropicCompaction {
+  /// Input tokens that trigger compaction (at least 50,000).
+  final int triggerTokens;
+
+  /// Replaces the server's summarization prompt. When null and the request
+  /// has tools, [textOnlyInstructions] is sent, because a model with tools
+  /// sometimes calls one instead of writing the summary.
+  final String? instructions;
+
+  const AnthropicCompaction({this.triggerTokens = 150000, this.instructions})
+    : assert(triggerTokens >= 50000, 'triggerTokens must be at least 50000');
+
+  static const textOnlyInstructions =
+      'Summarize the transcript inside <summary></summary> tags. Include '
+      'relevant information in the summary for continuing the task in the '
+      'next context window. Do not call any tools while writing this '
+      'summary; respond with text only.';
+}
+
+/// Server-side clearing of old tool results (`clear_tool_uses_20250919`,
+/// beta). The full history is still sent; the API removes old results
+/// from the prompt it gives the model.
+final class AnthropicToolResultClearing {
+  /// Input tokens above which clearing starts.
+  final int triggerTokens;
+
+  /// Most recent tool uses kept.
+  final int keepToolUses;
+
+  /// Clear at least this many tokens or nothing, so a clear is worth the
+  /// prompt-cache write it causes.
+  final int? clearAtLeastTokens;
+
+  /// Tools whose results are never cleared. Add `memory` when the agent
+  /// uses the memory tool.
+  final List<String> excludeTools;
+
+  /// Also clear the cleared calls' inputs.
+  final bool clearToolInputs;
+
+  const AnthropicToolResultClearing({
+    this.triggerTokens = 100000,
+    this.keepToolUses = 3,
+    this.clearAtLeastTokens,
+    this.excludeTools = const [],
+    this.clearToolInputs = false,
+  });
+}
+
+/// Server-side clearing of old thinking blocks (`clear_thinking_20251015`,
+/// beta).
+final class AnthropicThinkingClearing {
+  /// Assistant turns whose thinking is kept; null keeps all of it.
+  final int? keepTurns;
+
+  const AnthropicThinkingClearing({this.keepTurns});
+}
+
+/// Anthropic's server-side context management. Any combination may be set.
+final class AnthropicContextManagement {
+  final AnthropicCompaction? compaction;
+  final AnthropicToolResultClearing? clearToolResults;
+  final AnthropicThinkingClearing? clearThinking;
+
+  const AnthropicContextManagement({
+    this.compaction,
+    this.clearToolResults,
+    this.clearThinking,
+  });
+
+  bool get clears => clearToolResults != null || clearThinking != null;
+}
 
 /// Configuration for [AnthropicClient].
 final class AnthropicConfig {
@@ -45,6 +122,19 @@ final class AnthropicConfig {
   /// declines, the API re-runs the request on a fallback model.
   final bool refusalFallback;
 
+  /// Native structured output (`output_config.format`) for
+  /// `ModelSettings.outputSchema`. `null` decides by model name (Claude 3
+  /// and the original Claude 4 models get a prompt instruction instead).
+  final bool? nativeStructuredOutput;
+
+  /// Server-side compaction and clearing. With compaction on, the runner's
+  /// own `ContextPolicy` compaction is skipped.
+  final AnthropicContextManagement? contextManagement;
+
+  /// Declare tools with an `anthropicType` (such as the memory tool) as
+  /// that Anthropic-defined tool rather than by their schema.
+  final bool nativeToolTypes;
+
   final int? contextWindow;
 
   const AnthropicConfig({
@@ -59,8 +149,25 @@ final class AnthropicConfig {
     this.promptCaching = true,
     this.eagerInputStreaming = true,
     this.refusalFallback = true,
+    this.nativeStructuredOutput,
+    this.contextManagement,
+    this.nativeToolTypes = true,
     this.contextWindow,
   });
+
+  /// `anthropic-beta` values this configuration needs.
+  List<String> get betas => [
+    if (usesRefusalFallback) 'server-side-fallback-2026-07-01',
+    if (contextManagement?.compaction != null) 'compact-2026-01-12',
+    if (contextManagement?.clears ?? false) 'context-management-2025-06-27',
+  ];
+
+  bool get structuredOutputSupported {
+    if (nativeStructuredOutput != null) return nativeStructuredOutput!;
+    final m = model.toLowerCase();
+    return !(m.startsWith('claude-3') ||
+        RegExp(r'^claude-(opus|sonnet)-4(-0|-2025\d{4})?$').hasMatch(m));
+  }
 
   bool get samplingAllowed {
     if (sendSampling != null) return sendSampling!;
@@ -108,10 +215,12 @@ class AnthropicClient implements ModelClient {
     parallelToolCalls: true,
     vision: true,
     thinking: true,
-    structuredOutput: false,
+    structuredOutput: config.structuredOutputSupported,
     promptCaching: config.promptCaching,
     reportsUsage: true,
     contextWindow: config.contextWindow,
+    serverCompaction: config.contextManagement?.compaction != null,
+    maxOutputTokens: config.defaultMaxTokens,
   );
 
   @override
@@ -133,8 +242,7 @@ class AnthropicClient implements ModelClient {
         'x-api-key': config.apiKey,
         'anthropic-version': config.apiVersion,
         'Accept': 'text/event-stream',
-        if (config.usesRefusalFallback)
-          'anthropic-beta': 'server-side-fallback-2026-07-01',
+        if (config.betas.isNotEmpty) 'anthropic-beta': config.betas.join(','),
         ...config.headers,
       },
       cancel: cancel,
@@ -151,6 +259,10 @@ class AnthropicClient implements ModelClient {
     var cacheRead = 0;
     var cacheWrite = 0;
     var outputTokens = 0;
+    var compactionInput = 0;
+    var compactionOutput = 0;
+    String? compaction;
+    var compactionDeltas = false;
     String? stopReason;
 
     await for (final event in _transport.sseJson(response, cancel: cancel)) {
@@ -185,6 +297,9 @@ class AnthropicClient implements ModelClient {
             if (data is String) {
               yield ThinkingCompleteEvent('', redactedData: data);
             }
+          } else if (kind == 'compaction') {
+            final content = block['content'];
+            if (content is String) compaction = content;
           } else if (kind == 'thinking') {
             thinking[index] = StringBuffer(block['thinking'] as String? ?? '');
           } else if (kind == 'text') {
@@ -209,6 +324,13 @@ class AnthropicClient implements ModelClient {
               final sig = delta['signature'];
               if (sig is String) {
                 signatures[index] = (signatures[index] ?? '') + sig;
+              }
+            case 'compaction_delta':
+              final content = delta['content'];
+              if (content is String) {
+                compaction =
+                    compactionDeltas ? (compaction ?? '') + content : content;
+                compactionDeltas = true;
               }
             case 'input_json_delta':
               final partial = delta['partial_json'];
@@ -235,6 +357,30 @@ class AnthropicClient implements ModelClient {
           if (usage is Map && usage['output_tokens'] != null) {
             outputTokens = _n(usage['output_tokens']);
           }
+          // Compaction runs as its own sampling step; the top-level counts
+          // leave it out.
+          final iterations = usage is Map ? usage['iterations'] : null;
+          if (iterations is List) {
+            compactionInput = 0;
+            compactionOutput = 0;
+            for (final it in iterations) {
+              if (it is Map && it['type'] == 'compaction') {
+                compactionInput +=
+                    _n(it['input_tokens']) +
+                    _n(it['cache_read_input_tokens']) +
+                    _n(it['cache_creation_input_tokens']);
+                compactionOutput += _n(it['output_tokens']);
+              }
+            }
+          }
+          final edits = event['context_management'];
+          final applied = edits is Map ? edits['applied_edits'] : null;
+          if (applied is List && applied.isNotEmpty) {
+            developer.log(
+              'context edits applied: ${jsonEncode(applied)}',
+              name: _log,
+            );
+          }
         case 'error':
           final error = event['error'];
           final type = error is Map ? error['type'] : null;
@@ -250,6 +396,24 @@ class AnthropicClient implements ModelClient {
     final ends = calls.finishAll();
     for (final e in ends) {
       yield e;
+    }
+    final summary = compaction;
+    if (summary != null && summary.trim().isNotEmpty) {
+      yield MessageMetadataEvent({
+        compactionMetadataKey: {
+          'summary': summary,
+          'tokensBefore': compactionInput,
+        },
+      });
+    } else if (summary != null || compactionInput > 0) {
+      developer.log('compaction returned no summary', name: _log, level: 900);
+    }
+    // Reported before the message's own usage, which stays the last report
+    // (the runner calibrates its estimate on it).
+    if (compactionInput > 0 || compactionOutput > 0) {
+      yield UsageReport(
+        Usage(inputTokens: compactionInput, outputTokens: compactionOutput),
+      );
     }
     yield UsageReport(
       Usage(
@@ -278,8 +442,10 @@ class AnthropicClient implements ModelClient {
     final tools = request.tools;
     final thinkingOn = request.thinking?.enabled ?? false;
     final sampling = config.samplingAllowed && !thinkingOn;
+    final schema = request.outputSchema;
+    final native = schema != null && config.structuredOutputSupported;
     final schemaHint =
-        request.outputSchema == null
+        schema == null || native
             ? null
             : 'Respond with only a JSON value matching this JSON Schema, '
                 'no prose or code fences:\n${jsonEncode(request.outputSchema)}';
@@ -300,7 +466,12 @@ class AnthropicClient implements ModelClient {
             if (caching) 'cache_control': {'type': 'ephemeral'},
           },
         ],
-      'messages': toAnthropicMessages(request.messages),
+      'messages': toAnthropicMessages(
+        request.messages,
+        serverCompaction: config.contextManagement?.compaction != null,
+      ),
+      if (config.contextManagement case final cm?)
+        'context_management': {'edits': _edits(cm, tools.isNotEmpty)},
       // With tool_choice none the definitions are still sent: a transcript
       // holding tool_use/tool_result blocks is rejected without them.
       if (tools.isNotEmpty) ...{
@@ -309,17 +480,30 @@ class AnthropicClient implements ModelClient {
         'tools': [
           for (var i = 0; i < tools.length; i++)
             {
-              'name': tools[i].name,
-              'description': tools[i].description,
-              'input_schema': tools[i].inputSchema,
-              if (config.eagerInputStreaming) 'eager_input_streaming': true,
+              if (config.nativeToolTypes && tools[i].anthropicType != null) ...{
+                'type': tools[i].anthropicType,
+                'name': tools[i].name,
+              } else ...{
+                'name': tools[i].name,
+                'description': tools[i].description,
+                'input_schema': tools[i].inputSchema,
+                if (config.eagerInputStreaming) 'eager_input_streaming': true,
+              },
               if (caching && i == tools.length - 1)
                 'cache_control': {'type': 'ephemeral'},
             },
         ],
       },
       if (thinkingOn) 'thinking': {'type': 'adaptive', 'display': 'summarized'},
-      if (config.effort != null) 'output_config': {'effort': config.effort},
+      if (config.effort != null || native)
+        'output_config': {
+          if (config.effort != null) 'effort': config.effort,
+          if (native)
+            'format': {
+              'type': 'json_schema',
+              'schema': structuredOutputSchema(schema),
+            },
+        },
       // Never both: several models reject temperature + top_p together.
       if (sampling && request.temperature != null)
         'temperature': request.temperature
@@ -330,15 +514,142 @@ class AnthropicClient implements ModelClient {
     };
   }
 
+  /// Context edits; thinking clearing must come first.
+  static List<Map<String, Object?>> _edits(
+    AnthropicContextManagement cm,
+    bool hasTools,
+  ) {
+    final compaction = cm.compaction;
+    final instructions =
+        compaction?.instructions ??
+        (hasTools ? AnthropicCompaction.textOnlyInstructions : null);
+    return [
+      if (cm.clearThinking case final t?)
+        {
+          'type': 'clear_thinking_20251015',
+          'keep':
+              t.keepTurns == null
+                  ? 'all'
+                  : {'type': 'thinking_turns', 'value': t.keepTurns},
+        },
+      if (cm.clearToolResults case final c?)
+        {
+          'type': 'clear_tool_uses_20250919',
+          'trigger': {'type': 'input_tokens', 'value': c.triggerTokens},
+          'keep': {'type': 'tool_uses', 'value': c.keepToolUses},
+          if (c.clearAtLeastTokens != null)
+            'clear_at_least': {
+              'type': 'input_tokens',
+              'value': c.clearAtLeastTokens,
+            },
+          if (c.excludeTools.isNotEmpty) 'exclude_tools': c.excludeTools,
+          if (c.clearToolInputs) 'clear_tool_inputs': true,
+        },
+      if (compaction != null)
+        {
+          'type': 'compact_20260112',
+          'trigger': {
+            'type': 'input_tokens',
+            'value': compaction.triggerTokens,
+          },
+          if (instructions != null) 'instructions': instructions,
+        },
+    ];
+  }
+
+  static const _supportedFormats = {
+    'date-time',
+    'time',
+    'date',
+    'duration',
+    'email',
+    'hostname',
+    'uri',
+    'ipv4',
+    'ipv6',
+    'uuid',
+  };
+
+  static const _droppedKeywords = {
+    'minimum',
+    'maximum',
+    'exclusiveMinimum',
+    'exclusiveMaximum',
+    'multipleOf',
+    'minLength',
+    'maxLength',
+    'maxItems',
+    'uniqueItems',
+  };
+
+  /// Reduces a JSON Schema to what structured output accepts: numeric,
+  /// string and most array constraints are dropped, `minItems` is capped at
+  /// 1, objects get `additionalProperties: false`, `oneOf` becomes `anyOf`
+  /// and unsupported string formats are removed. The runner still checks
+  /// the answer against the original schema.
+  static Map<String, Object?> structuredOutputSchema(
+    Map<String, Object?> schema,
+  ) {
+    Object? walk(Object? node) {
+      if (node is List) return node.map(walk).toList();
+      if (node is! Map) return node;
+      final out = <String, Object?>{};
+      for (final entry in node.entries) {
+        final key = '${entry.key}';
+        final value = entry.value;
+        if (_droppedKeywords.contains(key)) continue;
+        switch (key) {
+          case 'minItems':
+            if (value is num) out[key] = value > 1 ? 1 : value.toInt();
+          case 'format':
+            if (_supportedFormats.contains(value)) out[key] = value;
+          case 'additionalProperties':
+            break;
+          case 'oneOf':
+            out['anyOf'] = walk(value);
+          case 'properties' || r'$defs' || 'definitions':
+            out[key] =
+                value is Map
+                    ? {for (final p in value.entries) '${p.key}': walk(p.value)}
+                    : value;
+          default:
+            out[key] = walk(value);
+        }
+      }
+      final type = out['type'];
+      final isObject =
+          type == 'object' ||
+          (type is List && type.contains('object')) ||
+          out.containsKey('properties');
+      if (isObject) out['additionalProperties'] = false;
+      return out;
+    }
+
+    return walk(schema) as Map<String, Object?>;
+  }
+
   /// Converts the harness transcript to Anthropic messages: consecutive
   /// same-role turns are merged, empty text is dropped, and the transcript
-  /// always starts with a user turn and never ends with an assistant turn.
+  /// always starts with a user turn (or the latest server compaction) and
+  /// never ends with an assistant turn.
+  ///
+  /// With [serverCompaction], history before the latest compaction is not
+  /// sent (the API ignores it). Without it, compaction summaries are left
+  /// out and the full history is sent, since the request has no beta
+  /// header for the block.
   static List<Map<String, Object?>> toAnthropicMessages(
-    List<AgentMessage> messages,
-  ) {
+    List<AgentMessage> messages, {
+    bool serverCompaction = false,
+  }) {
+    String? summaryOf(AgentMessage m) =>
+        serverCompaction && m.role == Role.assistant ? _summary(m) : null;
+    final latest = messages.lastIndexWhere((m) => summaryOf(m) != null);
     final out = <Map<String, Object?>>[];
-    for (final message in messages) {
-      final blocks = <Map<String, Object?>>[];
+    for (final message in latest < 0 ? messages : messages.skip(latest)) {
+      final summary = summaryOf(message);
+      final blocks = <Map<String, Object?>>[
+        if (summary != null) {'type': 'compaction', 'content': summary},
+      ];
       for (final block in message.content) {
         switch (block) {
           case TextBlock(:final text):
@@ -411,7 +722,9 @@ class AnthropicClient implements ModelClient {
         out.add({'role': role, 'content': blocks});
       }
     }
-    while (out.isNotEmpty && out.first['role'] != 'user') {
+    while (out.isNotEmpty &&
+        out.first['role'] != 'user' &&
+        (out.first['content'] as List).first['type'] != 'compaction') {
       out.removeAt(0);
     }
     if (out.isEmpty || out.last['role'] == 'assistant') {
@@ -423,6 +736,19 @@ class AnthropicClient implements ModelClient {
       });
     }
     return out;
+  }
+
+  /// Longest compaction summary replayed; a longer one is not trusted.
+  static const maxSummaryChars = 200000;
+
+  static String? _summary(AgentMessage message) {
+    final meta = message.providerMetadata[compactionMetadataKey];
+    final summary = meta is Map ? meta['summary'] : null;
+    return summary is String &&
+            summary.isNotEmpty &&
+            summary.length <= maxSummaryChars
+        ? summary
+        : null;
   }
 
   static int _n(Object? v) => v is num ? v.toInt() : 0;

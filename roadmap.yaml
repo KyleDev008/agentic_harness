@@ -1,0 +1,289 @@
+# agentic_harness upgrade roadmap.
+#
+# status: planned | in_progress | done | dropped
+# Ordered by priority. Update `status`, `progress` and `released_in` as work lands.
+
+updated: 2026-10-26
+
+releases:
+  "1.1.0": [mcp-client, durable-runs, anthropic-structured-output]
+  "1.2.0": [anthropic-context-tools, openai-responses-client]
+
+items:
+  - id: mcp-client
+    title: MCP client tools
+    priority: 1
+    status: done
+    summary: >-
+      Connect to Model Context Protocol servers (stdio and Streamable HTTP),
+      list their tools and expose each as a HarnessTool, mapping MCP tool
+      annotations onto ToolAnnotations.
+    why: >-
+      Table stakes in the Claude and OpenAI Agents SDKs. Home Base's MCP
+      feature can then use the real protocol.
+    tasks:
+      - JSON-RPC 2.0 session (initialize, notifications/initialized, ping, cancel)
+      - Streamable HTTP transport (JSON and SSE responses, Mcp-Session-Id)
+      - stdio transport (newline-delimited JSON over a child process)
+      - tools/list with pagination and tools/call to HarnessTool
+      - Map annotations and isError; text, image and structured content
+      - Tests against an in-memory fake server
+    progress:
+      - 2026-10-26: >-
+          McpClient (2026-07-28 stateless protocol with dual-era fallback to
+          initialize for 2025-11-25/06-18/03-26), McpHttpTransport,
+          McpStdioTransport (io_tools), McpToolset/McpTool. Reviewer and
+          security findings fixed (stdio exit/dead-process handling, cancel
+          races, SSE tail, era classification, https required, env
+          allowlist, size caps, server titles kept out of permission
+          labels, required prefix, onToolsChanged). 22 tests.
+    follow_ups:
+      - Handle notifications/tools/list_changed (needs a listening stream)
+      - OAuth 2.1 authorization flow (headerProvider covers static/refreshed tokens)
+      - Resources, prompts and elicitation (input_required) support
+      - Optional SSRF guard for user-supplied endpoints
+      - Switch Home Base's MCP feature to McpToolset
+    released_in: null
+
+  - id: durable-runs
+    title: Durable runs (pause, serialize, resume)
+    priority: 2
+    status: done
+    summary: >-
+      A JSON-serializable RunState so a run can stop at an approval or
+      ask_user, be persisted, and resume later, even after a restart.
+    why: OpenAI Agents SDK has durable approvals; also gives crash recovery.
+    tasks:
+      - RunState snapshot (transcript, pending calls, budgets used, turn count)
+      - Interrupt on ask / ask_user instead of awaiting a callback
+      - Runner.resume(state, decisions)
+      - Round-trip tests
+    status_note: >-
+      Adds StopReason.interrupted, which breaks exhaustive switches (Home
+      Base's ai_chat_viewmodel has one). Consider releasing as 2.0.0, or add
+      the case in Home Base before it picks up 1.1.0.
+    progress:
+      - 2026-10-26: >-
+          RunConfig.interruptible stops at approvals and at questions from
+          replayable tools (HarnessTool.replayable; ask_user opts in) with
+          StopReason.interrupted and RunResult.state. RunState is JSON
+          (transcript, produced messages, turns, usage, active time, todos,
+          call counts, safety flags, pending turn); approve/reject/answer
+          then Runner.resume, which keeps the run id and budgets. Answers are
+          replayed per question; RunConfig.onCheckpoint snapshots each turn.
+          Reviewer and security findings fixed (answer replay without
+          interruptible, resumed calls re-validated and re-checked for
+          dry-run and permissions, approvals carried through a later
+          question, answers bound to their prompt, state cross-checked
+          against the transcript; at-least-once and trust model documented).
+          18 tests.
+    follow_ups:
+      - Optional signed state (HMAC over toJson) for hosts that store it outside the app
+      - Fingerprint the tool definition in an approval and re-ask if it changed
+      - Checkpoint mid-turn (after each tool) to avoid re-running tools after a crash
+    released_in: null
+
+  - id: anthropic-structured-output
+    title: Native structured output on Anthropic
+    priority: 3
+    status: done
+    summary: >-
+      Use Anthropic's native JSON-schema output instead of the prompt
+      instruction plus repair attempt.
+    tasks:
+      - Confirm current API shape in Anthropic docs
+      - Send the schema natively; keep the prompt fallback for older models
+      - Set capabilities.structuredOutput accordingly
+    progress:
+      - 2026-10-26: >-
+          output_config.format (GA, no beta header) merged with effort;
+          schema reduced to the supported subset (numeric/string/array
+          constraints dropped, minItems capped at 1, additionalProperties
+          false, oneOf to anyOf, unsupported formats removed); the runner
+          still validates against the original schema. Claude 3 and the
+          original Claude 4 models keep the prompt instruction;
+          AnthropicConfig.nativeStructuredOutput overrides. 2 tests.
+    released_in: null
+
+  - id: anthropic-context-tools
+    title: Anthropic server-side context management
+    priority: 4
+    status: done
+    summary: >-
+      Opt-in server compaction (compact_20260112), tool-result clearing
+      (clear_tool_uses_20250919) and the client-side memory tool
+      (memory_20250818) with a pluggable store.
+    tasks:
+      - Pass context_management edits and beta headers
+      - Round-trip compaction blocks in history
+      - Memory tool with an in-memory and a file-backed store
+      - ContextPolicy delegates to the server when supported
+    progress:
+      - 2026-10-26: >-
+          AnthropicConfig.contextManagement: threshold compaction
+          (compact_20260112, text-only summary prompt when tools are
+          present), tool-result and thinking clearing, with beta headers.
+          Summaries are kept in providerMetadata['compaction'], replayed
+          first and earlier history is not sent (only while compaction is
+          on; oversized summaries ignored); compaction tokens count toward
+          usage; ContextCompacted(stage: 'server');
+          ModelCapabilities.serverCompaction skips the runner's own
+          compaction. MemoryTool (native memory_20250818 on Anthropic,
+          schema elsewhere) with InMemoryMemoryStore and FileMemoryStore.
+          Reviewer and security findings fixed (compaction-only replies,
+          summary replay without the beta, Windows device names and
+          invisible characters, serialized commands, link refusal,
+          askBeforeWrites, temp cleanup). 19 tests.
+    follow_ups:
+      - On-demand compaction (compact-2026-09-04), which keeps recent turns and their thinking
+      - pause_after_compaction support
+      - Confirm compaction and clearing may share one edits array (docs are silent)
+      - Live test against the API (all tests use recorded shapes)
+    released_in: null
+
+  - id: openai-responses-client
+    title: OpenAI Responses API client
+    priority: 5
+    status: done
+    summary: >-
+      New client for /v1/responses: reasoning items carried between turns,
+      optional previous_response_id, semantic streaming events.
+    progress:
+      - 2026-10-26: >-
+          OpenAiResponsesClient: function_call / function_call_output items,
+          reasoning summaries as thinking, reasoning items (encrypted when
+          store is off, the default) kept in providerMetadata in output
+          order and replayed; previous_response_id chaining guarded by a
+          history fingerprint; buffered JSON fallback; typed errors.
+          Reviewer and security findings fixed (failed/cut-off responses,
+          unresolvable reasoning, stale chaining, size caps, message order,
+          unnamed calls, transport local-host check). A chained request
+          whose stored response is gone (expired, deleted, other project)
+          is resent once with the full history. 19 tests.
+    follow_ups:
+      - Built-in tools (web_search, file_search, code_interpreter) and MCP via the Responses tools array
+      - Share endpoint/header/reasoning-model helpers with OpenAiChatClient
+      - Include the API key/project in the chaining fingerprint
+      - Live test against the API (tests use documented event shapes)
+    released_in: null
+
+  - id: tracing-and-cost
+    title: Tracing and cost tracking
+    priority: 6
+    status: done
+    summary: >-
+      Span tree per run (model calls, tools, subagents) exportable to
+      OpenTelemetry; per-model pricing table, RunResult.cost and a cost budget.
+    progress:
+      - 2026-10-26: >-
+          TraceSpan / SpanExporter with InMemorySpanExporter and
+          OtlpHttpExporter (OTLP/HTTP JSON, batched); invoke_agent, chat and
+          execute_tool spans with GenAI semantic-convention attributes and no
+          content; subagents nest in the parent trace via
+          ToolContext.telemetry / Runner.run(telemetry:). PricingTable /
+          ModelPricing (no built-in prices), RunResult.cost and
+          UsageUpdated.cost including subagents, RunConfig.maxCost budget;
+          RunState keeps cost and trace id. Reviewer and security findings
+          fixed (https-only exporter without redirects, one send at a time,
+          telemetry only for tools that start runs, cost hook sanitised,
+          span errors as classes, approval pauses not errors, no double
+          counting on resumed subagents). Built-in dated price list with
+          long-prompt tiers, scheduled changes and JSON overrides; maxCost
+          enforced per call by capping output tokens (subagents inherit the
+          remainder; unpriced budgeted runs refuse to start); summarizing
+          compaction counted. 22 tests.
+    follow_ups:
+      - Optional opt-in content capture (prompts/outputs) for debugging traces
+      - Predict Anthropic server-side compaction cost in the budget check
+      - Model batch/priority/regional/fast-mode rates and server-tool fees
+    released_in: null
+
+  - id: handoffs-and-background-subagents
+    title: Handoffs and background subagents
+    priority: 7
+    status: done
+    summary: >-
+      OpenAI-style handoffs (transfer control to another AgentSpec) and
+      concurrent subagents that report back, with depth and concurrency caps.
+    progress:
+      - 2026-10-26: >-
+          Handoffs (AgentSpec.handoffs, transfer_to_<agent> tools, input
+          filters, maxHandoffs, HandoffOccurred, RunResult.agentName, resume
+          with the active agent). Background subagents
+          (SubagentTool.background, results delivered as untrusted messages,
+          parent waits before finishing, maxBackgroundTasks, 15-minute
+          limit, cancelled with the run) and maxSubagentDepth. BudgetLedger
+          shared down the run tree (reservations, fair shares, waiting for
+          in-flight calls). 10 tests.
+    follow_ups:
+      - Save background tasks in checkpoints / paused runs
+      - Let background subagents ask the user (route questions to the parent)
+    released_in: null
+
+  - id: skills
+    title: Skills
+    priority: 8
+    status: done
+    summary: >-
+      Load instruction and resource bundles on demand: the model sees a
+      short index and pulls a skill's full content when needed.
+    progress:
+      - 2026-10-26: >-
+          Skill (validated name/description, in-memory files or a reader),
+          Skill.fromMarkdown for SKILL.md front matter, SkillSet
+          ToolProvider with load_skill (index in its description, capped)
+          and read_skill_file, DirectorySkillSource in io_tools (confined,
+          link-refusing, text-only, size-capped reads).
+          HarnessTool.readsPrivateData so skill and handoff tools don't
+          taint the run. 8 tests.
+    follow_ups:
+      - Skills that bring their own tools (pairs with tool search, item 9)
+      - Skill scripts (run a skill's script in the sandboxed executor, item 10)
+    released_in: null
+
+  - id: tool-search
+    title: Tool search / deferred tools
+    priority: 9
+    status: done
+    summary: >-
+      Keep large tool catalogues (for example many MCP tools) out of the
+      prompt; the model searches and loads tool schemas as needed.
+    progress:
+      - 2026-10-26: >-
+          HarnessTool.deferLoading, DeferredTools wrapper (provider or
+          list), ToolSearchIndex (BM25 over name x2, description, parameter
+          names, camel/snake split, exact-name boost), built-in
+          search_tools tool (keywords or select:names) added by the runner
+          when deferred tools exist; loaded tools appended to the
+          definitions from the next call, capped by maxLoadedTools,
+          persisted in RunState, cleared on handoff; direct calls to a
+          deferred tool load it. 7 tests.
+    follow_ups:
+      - Use provider-native tool search (Anthropic tool_search_tool_bm25 / OpenAI defer_loading) when available
+      - Let loaded skills add tools (with item 8)
+      - Unload tools that haven't been used for a while
+    released_in: null
+
+  - id: sandboxed-executor
+    title: Sandboxed executor for IO tools
+    priority: 10
+    status: done
+    summary: >-
+      Run IO tools in a container or remote sandbox behind the existing
+      Workspace and ProcessRunner interfaces.
+    progress:
+      - 2026-10-26: >-
+          Sandbox interface (resolve/pathInside/typeOf/length/read/list/
+          write/delete/run), LocalSandbox (Workspace + runProcess) and
+          DockerSandbox (host-side confined files; per-command docker run
+          with --rm --init, network none by default, --cap-drop ALL,
+          no-new-privileges, read-only root + /tmp tmpfs, memory/cpu/pids
+          limits, optional user, bind mount at /workspace, docker kill on
+          timeout/cancel, validated image/network/user/env). IO tools take
+          workspaceRoot or sandbox. 8 tests (Docker via an injected runner;
+          not run against a live engine).
+    follow_ups:
+      - Live test against a running Docker engine
+      - A remote sandbox implementation (e.g. an HTTP sandbox service)
+      - Copy-in workspaces (no host mount) for untrusted code
+    released_in: null
