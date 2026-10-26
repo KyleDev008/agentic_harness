@@ -665,35 +665,31 @@ void main() {
     });
   });
 
-  test(
-    'stdio transport talks to a legacy server process',
-    () async {
-      final client = McpClient(
-        McpStdioTransport(
-          Platform.resolvedExecutable,
-          arguments: ['test/fixtures/fake_mcp_stdio_server.dart'],
-        ),
-      );
-      addTearDown(client.close);
-      final toolset = McpToolset(client, prefix: 'fake');
-      final tools = await toolset.listTools();
-      expect(client.isLegacy, isTrue);
-      expect(client.protocolVersion, '2025-06-18');
-      expect(client.serverInfo['name'], 'stdio-fake');
-      final output = await tools.single.call({'text': 'hey'}, _context());
-      expect(output.text, 'HEY');
+  test('stdio transport talks to a legacy server process', () async {
+    final client = McpClient(
+      McpStdioTransport(
+        Platform.resolvedExecutable,
+        arguments: ['test/fixtures/fake_mcp_stdio_server.dart'],
+      ),
+    );
+    addTearDown(client.close);
+    final toolset = McpToolset(client, prefix: 'fake');
+    final tools = await toolset.listTools();
+    expect(client.isLegacy, isTrue);
+    expect(client.protocolVersion, '2025-06-18');
+    expect(client.serverInfo['name'], 'stdio-fake');
+    final output = await tools.single.call({'text': 'hey'}, _context());
+    expect(output.text, 'HEY');
 
-      // The server replies, then exits: the reply still arrives, and later
-      // calls fail fast instead of hanging.
-      final bye = await client.callTool('bye', {});
-      expect((bye['content'] as List).single['text'], 'bye');
-      await expectLater(
-        client.callTool('shout', {'text': 'x'}),
-        throwsA(isA<McpTransportError>()),
-      );
-    },
-    timeout: const Timeout(Duration(minutes: 1)),
-  );
+    // The server replies, then exits: the reply still arrives, and later
+    // calls fail fast instead of hanging.
+    final bye = await client.callTool('bye', {});
+    expect((bye['content'] as List).single['text'], 'bye');
+    await expectLater(
+      client.callTool('shout', {'text': 'x'}),
+      throwsA(isA<McpTransportError>()),
+    );
+  }, timeout: const Timeout(Duration(minutes: 1)));
 }
 
 ToolContext _context() => ToolContext(
