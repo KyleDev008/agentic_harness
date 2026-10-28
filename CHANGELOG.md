@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1
+
+- Documentation is now published at [projects.kylecox.co.za/agentic_harness/docs](https://projects.kylecox.co.za/agentic_harness/docs/), linked from the pub.dev page. No code changes.
+
 ## 2.0.0
 
 **Breaking for exhaustive switches only.** Code written for 1.0 compiles unchanged unless it switches over every `StopReason` value or every `RunEvent` type without a `default`:

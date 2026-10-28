@@ -4,6 +4,8 @@ A pure Dart harness for tool-using AI agents. Give it a model, a system prompt a
 
 The core has no `dart:io` and no Flutter dependency, so it runs in Flutter apps (mobile and desktop), on servers and in CLIs.
 
+**Docs:** [projects.kylecox.co.za/agentic_harness/docs](https://projects.kylecox.co.za/agentic_harness/docs/)
+
 ## Features
 
 - **Native tool-use loop.** Read-only calls run in parallel; others run in order. Every tool call gets exactly one result, including unknown tools, invalid input, denials, timeouts and repeated identical calls, so the model can always recover.
@@ -102,6 +104,7 @@ final agent = AgentSpec(
 
 ## Learn more
 
+- [Documentation](https://projects.kylecox.co.za/agentic_harness/docs/): the full guide online, with search-friendly sections and examples.
 - [Usage guide](doc/guide.md): the loop, clients, tools, permissions, context, events and testing.
 - [Example](example/main.dart): a console agent with a permission prompt. It runs offline with a scripted model, or against Anthropic or OpenAI when an API key is set.
 
