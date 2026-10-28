@@ -106,11 +106,28 @@ final agent = AgentSpec(
 
 - [Documentation](https://projects.kylecox.co.za/agentic_harness/docs/): the full guide online, with search-friendly sections and examples.
 - [Usage guide](doc/guide.md): the loop, clients, tools, permissions, context, events and testing.
+- [Changelog](CHANGELOG.md): what changed in each release.
 - [Example](example/main.dart): a console agent with a permission prompt. It runs offline with a scripted model, or against Anthropic or OpenAI when an API key is set.
 
 ## Versioning
 
 New `StopReason` values and new `RunEvent` types only arrive in major versions, so a `switch` that lists every case keeps compiling across minor updates. Other enums and classes may grow in minor versions.
+
+## Support
+
+`agentic_harness` is free and open source. If it saves you time, you can support its development:
+
+[![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-buymeacoffee.com%2Fkylecox-39ff88?style=for-the-badge&logo=buymeacoffee&logoColor=0b0f0c&labelColor=39ff88)](https://buymeacoffee.com/kylecox)
+[![Donate with PayPal](https://img.shields.io/badge/PayPal-paypal.me%2Fkodex00-0b0f0c?style=for-the-badge&logo=paypal&logoColor=39ff88&labelColor=111813)](https://paypal.me/kodex00)
+
+Stay in touch or see what else I'm building:
+
+- **Website and projects:** [kylecox.co.za](https://kylecox.co.za) · [projects.kylecox.co.za](https://projects.kylecox.co.za/)
+- **LinkedIn:** [linkedin.com/in/kyle-c-b293b48a](https://www.linkedin.com/in/kyle-c-b293b48a/)
+- **GitHub:** [github.com/KyleDev008](https://github.com/KyleDev008)
+- **Stack Overflow:** [stackoverflow.com/users/16088127/kyledev](https://stackoverflow.com/users/16088127/kyledev)
+
+Bug reports and feature requests are welcome in the [issue tracker](https://github.com/KyleDev008/agentic_harness/issues).
 
 ## License
 
