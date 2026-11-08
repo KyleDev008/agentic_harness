@@ -13,6 +13,9 @@ Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projec
 
 - `RunState.toSignedJson(key)` / `RunState.fromSignedJson(json, key)`: run state signed with HMAC-SHA256, for hosts that store it where others could edit it. An edited state, or one signed with another key, is refused. Adds a dependency on `package:crypto`.
 - `PermissionPolicy.isBroaderThan(other)`: whether a policy could run without asking a call that `other` would ask about or refuse.
+- `McpHttpTransport(endpointGuard:)`: checked before every request. Pass `const NetGuard().check` (from `io_tools.dart`) for endpoints a user typed in, so they can't reach loopback, private or cloud-metadata addresses.
+- `readOnlyPaths` on `Workspace`, `LocalSandbox` and `DockerSandbox`: workspace-relative folders (a skills folder, for example) that the file tools refuse to write or delete. `DockerSandbox` also mounts them read-only.
+- `DockerSandbox.securityWarnings()`: says when the Docker engine runs without a seccomp profile or with it unconfined. `available()` logs these once.
 - `McpNotificationSource`, implemented by `McpHttpTransport` and `McpStdioTransport`: server notifications as a stream. `McpToolset` drops its cached tool list on `notifications/tools/list_changed` (over HTTP, when one arrives in a response stream).
 
 ### Changed
@@ -26,6 +29,9 @@ Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projec
 ### Fixed
 
 - `DockerSandbox` on Windows runs containers as `1000:1000` by default instead of the image's user (usually root). Docker Desktop lets any container user write to the workspace, so nothing else changes; pass `runAsRoot: true` for the old behaviour.
+- `GitTool` keeps credential files out of whole-tree commands: `show`, `diff`, `log -p` and `add -A` / `add <path>` get exclude pathspecs for the same files the name check refuses, so a tracked `.env` or key file is no longer printed, and an untracked one is no longer staged, without being named. `commit -a` stages tracked changes the same way before committing, so a changed tracked secret isn't committed.
+- `GitTool` passes `--no-ext-diff --no-textconv` to `diff`, `show` and `log`, so diff programs configured in a repository don't run.
+- `DockerSandbox(readOnlyGit: true)` also mounts nested repositories' `.git` folders and files read-only. Submodules were already covered through the root `.git`. The scan is bounded by `maxGitScanEntries` (20,000 folders by default); past it, or when a nested `.git` is a link, the command is refused rather than run unprotected.
 - `GitTool` refuses pathspec globs and magic (`*.env`, `.en?`, `:(top).env`, `:/`), which could reach credential files the name check didn't see.
 - `DockerSandbox` hides the workspace's host path from output on Windows in any letter case, with either slash, and when the root is given with a trailing slash.
 - `DockerSandbox` logs a warning when it can't remove a container after 5 attempts (`DockerSandbox.reapOrphans()` clears leftovers), and no longer spends about 2 seconds retrying when Docker isn't installed.

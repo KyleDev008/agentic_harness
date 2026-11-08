@@ -331,6 +331,110 @@ void main() {
       );
     });
 
+    test('readOnlyGit also mounts nested repositories read-only', () async {
+      Directory('${root.path}/.git').createSync();
+      Directory('${root.path}/vendor/lib/.git').createSync(recursive: true);
+      Directory(
+        '${root.path}/vendor/lib/.git/inner/.git',
+      ).createSync(recursive: true);
+      final args = await DockerSandbox(
+        workspaceRoot: root.path,
+        image: 'node',
+        readOnlyGit: true,
+        runner: FakeDocker().call,
+      ).runArguments('n', 'git', ['status']);
+      final mounts = args.where((a) => a.endsWith(',readonly')).toList();
+      expect(mounts, hasLength(2));
+      expect(
+        mounts.where((m) => m.contains('target=/workspace/vendor/lib/.git,')),
+        hasLength(1),
+      );
+    });
+
+    test('readOnlyGit covers gitlink files and fails closed', () async {
+      Directory('${root.path}/.git').createSync();
+      Directory('${root.path}/sub').createSync();
+      File('${root.path}/sub/.git').writeAsStringSync('gitdir: ../.git/x');
+      final args = await DockerSandbox(
+        workspaceRoot: root.path,
+        image: 'node',
+        readOnlyGit: true,
+        runner: FakeDocker().call,
+      ).runArguments('n', 'git', ['status']);
+      expect(
+        args.where((a) => a.contains('target=/workspace/sub/.git,readonly')),
+        hasLength(1),
+      );
+
+      for (var i = 0; i < 3; i++) {
+        Directory('${root.path}/d$i').createSync();
+      }
+      await expectLater(
+        DockerSandbox(
+          workspaceRoot: root.path,
+          image: 'node',
+          readOnlyGit: true,
+          maxGitScanEntries: 2,
+          runner: FakeDocker().call,
+        ).runArguments('n', 'git', ['status']),
+        throwsA(isA<WorkspaceViolation>()),
+      );
+    });
+
+    test('readOnlyPaths: mounted read-only and refused for writes', () async {
+      Directory('${root.path}/skills/a').createSync(recursive: true);
+      final sandbox = DockerSandbox(
+        workspaceRoot: root.path,
+        image: 'node',
+        readOnlyPaths: ['skills', 'missing'],
+        runner: FakeDocker().call,
+      );
+      final args = await sandbox.runArguments('n', 'ls', []);
+      final mounts = args.where((a) => a.endsWith(',readonly')).toList();
+      expect(mounts, hasLength(1));
+      expect(mounts.single, contains('target=/workspace/skills,readonly'));
+      await expectLater(
+        sandbox.resolve('skills/a/SKILL.md', forWrite: true),
+        throwsA(isA<WorkspaceViolation>()),
+      );
+      expect(await sandbox.resolve('skills/a/SKILL.md'), 'skills/a/SKILL.md');
+      expect(await sandbox.resolve('other.txt', forWrite: true), 'other.txt');
+    });
+
+    test('readOnlyPaths must stay inside the workspace', () {
+      for (final bad in ['', '.', '../x', '/etc', 'a/../../b']) {
+        expect(
+          () => DockerSandbox(
+            workspaceRoot: root.path,
+            image: 'node',
+            readOnlyPaths: [bad],
+          ),
+          throwsArgumentError,
+          reason: bad,
+        );
+      }
+    });
+
+    test('security warnings from docker info', () {
+      expect(
+        DockerSandbox.securityWarningsFor(
+          '["name=seccomp,profile=builtin","name=cgroupns"]',
+        ),
+        isEmpty,
+      );
+      expect(
+        DockerSandbox.securityWarningsFor('["name=cgroupns"]').single,
+        contains('no seccomp'),
+      );
+      expect(
+        DockerSandbox.securityWarningsFor(
+          '["name=seccomp,profile=unconfined"]',
+        ).single,
+        contains('unconfined'),
+      );
+      expect(DockerSandbox.securityWarningsFor('not json'), isEmpty);
+    });
+
     test('readOnlyGit refuses a worktree', () async {
       File('${root.path}/.git').writeAsStringSync('gitdir: ../elsewhere');
       await expectLater(

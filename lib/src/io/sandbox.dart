@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
@@ -77,7 +78,10 @@ abstract interface class Sandbox {
 /// programs run directly with [runProcess].
 class LocalSandbox implements Sandbox {
   final Workspace workspace;
-  LocalSandbox(String root) : workspace = Workspace(root);
+
+  /// [readOnlyPaths]: see [Workspace.readOnlyPaths].
+  LocalSandbox(String root, {List<String> readOnlyPaths = const []})
+    : workspace = Workspace(root, readOnlyPaths: readOnlyPaths);
 
   @override
   String get description => 'local folder';
@@ -249,10 +253,16 @@ class DockerSandbox implements Sandbox {
   final bool runAsRoot;
   final bool readOnlyRoot;
 
-  /// Mount the workspace's `.git` directory read-only (commits from the
-  /// container then fail). Nested repositories and submodules aren't
-  /// covered, and a worktree (`.git` file) is refused.
+  /// Mount the workspace's `.git` directory, and every nested `.git`
+  /// folder or file, read-only (commits from the container then fail).
+  /// Submodules are covered through the root `.git`. Checked before each
+  /// command, so a repository a command creates is writable during that
+  /// command. A worktree (`.git` file at the root) is refused.
   final bool readOnlyGit;
+
+  /// How many folders the nested-repository scan for [readOnlyGit] may
+  /// visit; past it, commands are refused.
+  final int maxGitScanEntries;
   final String dockerExecutable;
   final ProcessRunner _runner;
 
@@ -269,9 +279,11 @@ class DockerSandbox implements Sandbox {
     this.runAsRoot = false,
     this.readOnlyRoot = true,
     this.readOnlyGit = false,
+    this.maxGitScanEntries = 20000,
+    List<String> readOnlyPaths = const [],
     this.dockerExecutable = 'docker',
     ProcessRunner runner = runProcess,
-  }) : _files = LocalSandbox(workspaceRoot),
+  }) : _files = LocalSandbox(workspaceRoot, readOnlyPaths: readOnlyPaths),
        _runner = runner,
        user = user ?? (runAsRoot ? null : _defaultUser()) {
     if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/:@-]*$').hasMatch(image)) {
@@ -349,10 +361,60 @@ class DockerSandbox implements Sandbox {
     }
   }
 
-  /// Whether the Docker engine answers.
+  /// Whether the Docker engine answers. Also logs [securityWarnings] once.
   Future<bool> available() async {
     final out = await _docker(['version', '--format', '{{.Server.Version}}']);
-    return out != null && out.exitCode == 0 && !out.timedOut;
+    final ok = out != null && out.exitCode == 0 && !out.timedOut;
+    if (ok && !_securityChecked) {
+      _securityChecked = true;
+      for (final warning in await securityWarnings()) {
+        developer.log(warning, name: _log, level: 900);
+      }
+    }
+    return ok;
+  }
+
+  bool _securityChecked = false;
+  static const _log = 'agentic_harness.sandbox';
+
+  /// Problems with the engine's security profiles: seccomp missing or
+  /// unconfined (containers can then make any system call). Empty when
+  /// all is well or the engine couldn't be asked.
+  Future<List<String>> securityWarnings() async {
+    final out = await _docker([
+      'info',
+      '--format',
+      '{{json .SecurityOptions}}',
+    ]);
+    if (out == null || out.exitCode != 0 || out.timedOut) return const [];
+    return securityWarningsFor(out.stdout);
+  }
+
+  /// [securityWarnings] for `docker info --format '{{json .SecurityOptions}}'`
+  /// output. Public for tests.
+  static List<String> securityWarningsFor(String securityOptionsJson) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(securityOptionsJson.trim());
+    } on FormatException {
+      return const [];
+    }
+    if (decoded is! List) return const [];
+    final options = decoded.map((o) => '$o'.toLowerCase()).toList();
+    final seccomp = options.where((o) => o.startsWith('name=seccomp'));
+    if (seccomp.isEmpty) {
+      return const [
+        'Docker reports no seccomp profile: sandboxed commands can make any '
+            'system call. Enable seccomp in the Docker engine.',
+      ];
+    }
+    if (seccomp.any((o) => o.contains('profile=unconfined'))) {
+      return const [
+        "Docker's default seccomp profile is unconfined: sandboxed commands "
+            'can make any system call. Use the default profile.',
+      ];
+    }
+    return const [];
   }
 
   /// Pulls [image] (containers run with `--pull=never`).
@@ -401,6 +463,45 @@ class DockerSandbox implements Sandbox {
   @override
   Future<void> delete(String path) => _files.delete(path);
 
+  /// Workspace-relative paths of nested `.git` folders and `.git` files
+  /// (gitlinks), not the root one, found breadth-first without following
+  /// links. Throws [WorkspaceViolation] when a nested `.git` is a link
+  /// (its mount would follow it) or after [maxGitScanEntries] folders,
+  /// rather than run with repositories it couldn't protect.
+  Future<List<String>> _nestedGitDirs(String source) async {
+    final found = <String>[];
+    final queue = Queue<Directory>()..add(Directory(source));
+    var visited = 0;
+    while (queue.isNotEmpty) {
+      final dir = queue.removeFirst();
+      if (++visited > maxGitScanEntries) {
+        throw WorkspaceViolation(
+          'readOnlyGit looked through $maxGitScanEntries folders without '
+          'finishing; raise maxGitScanEntries or use a smaller workspace',
+        );
+      }
+      try {
+        await for (final entry in dir.list(followLinks: false)) {
+          final isGit = p.basename(entry.path).toLowerCase() == '.git';
+          if (isGit && dir.path != source) {
+            final rel = p.split(p.relative(entry.path, from: source)).join('/');
+            if (entry is Link) {
+              throw WorkspaceViolation(
+                'readOnlyGit cannot protect "$rel": it is a link',
+              );
+            }
+            found.add(rel);
+          } else if (entry is Directory && !isGit) {
+            queue.add(entry); // never descend into a .git folder
+          }
+        }
+      } on FileSystemException {
+        continue; // unreadable here: skip it
+      }
+    }
+    return found;
+  }
+
   /// The `docker run` arguments for one command. Public for tests.
   Future<List<String>> runArguments(
     String name,
@@ -439,6 +540,32 @@ class DockerSandbox implements Sandbox {
         throw ArgumentError.value(key, 'environment', 'Invalid variable name');
       }
     }
+    final readOnlyMounts = <String>{
+      // Resolved through links (and refused if one leads outside), so the
+      // mount can't expose a host folder beyond the workspace.
+      for (final path in _files.workspace.readOnlyPaths)
+        if (await FileSystemEntity.type(p.join(source, path)) !=
+            FileSystemEntityType.notFound)
+          p
+              .split(
+                p.relative(await _files.workspace.resolve(path), from: source),
+              )
+              .join('/'),
+      if (readOnlyGit) ...await _nestedGitDirs(source),
+    }; // a set: Docker refuses two mounts on one target
+    for (final rel in readOnlyMounts) {
+      if (rel == '.' || rel.isEmpty) {
+        throw const WorkspaceViolation(
+          'a read-only path resolves to the whole workspace',
+        );
+      }
+      if (RegExp(r'[,"\r\n]').hasMatch(rel)) {
+        throw WorkspaceViolation(
+          'the read-only path "$rel" must not contain commas, quotes or '
+          'line breaks',
+        );
+      }
+    }
     final gitDir = Directory(p.join(source, '.git'));
     if (readOnlyGit &&
         await FileSystemEntity.type(gitDir.path, followLinks: false) ==
@@ -471,6 +598,11 @@ class DockerSandbox implements Sandbox {
       if (readOnlyGit && gitDir.existsSync()) ...[
         '--mount',
         'type=bind,source=${gitDir.path},target=$mountPoint/.git,readonly',
+      ],
+      for (final rel in readOnlyMounts) ...[
+        '--mount',
+        'type=bind,source=${p.joinAll([source, ...rel.split('/')])},'
+            'target=$mountPoint/$rel,readonly',
       ],
       '--workdir', await pathInside(workingDirectory),
       for (final e in env.entries) ...['--env', '${e.key}=${e.value}'],
@@ -520,7 +652,7 @@ class DockerSandbox implements Sandbox {
           developer.log(
             'Container $name could not be removed after 5 attempts; it may '
             'still be running. DockerSandbox.reapOrphans() removes leftovers.',
-            name: 'agentic_harness.sandbox',
+            name: _log,
             level: 900,
           );
         }();

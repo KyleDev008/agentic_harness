@@ -41,8 +41,9 @@ items:
       - Listen on a GET stream for notifications between requests (list_changed is handled when it arrives in a response stream or over stdio)
       - OAuth 2.1 authorization flow (headerProvider covers static/refreshed tokens)
       - Resources, prompts and elicitation (input_required) support
-      - Optional SSRF guard for user-supplied endpoints
       - Switch Home Base's MCP feature to McpToolset
+      - Pin HTTP connections to the address endpointGuard checked (DNS rebinding)
+      - Home Base passes NetGuard as endpointGuard for user-typed server URLs
     released_in: null
 
   - id: durable-runs

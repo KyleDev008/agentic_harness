@@ -15,8 +15,9 @@ import 'workspace.dart';
 /// capped: [maxFileBytes] per file, [maxFilesPerSkill] files listed per
 /// skill, [maxSkills] skills. A skill that fails to parse is skipped with a
 /// log line. The folder is trusted content: only point this at skills you
-/// wrote or reviewed, keep it out of reach of the agent's write tools, and
-/// note that hard links inside it can't be detected.
+/// wrote or reviewed, keep it out of reach of the agent's write tools
+/// (outside the workspace, or in the sandbox's `readOnlyPaths`), and note
+/// that hard links inside it can't be detected.
 class DirectorySkillSource implements SkillSource {
   final String root;
   final int maxFileBytes;

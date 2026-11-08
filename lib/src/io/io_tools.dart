@@ -492,6 +492,101 @@ class GitTool extends HarnessTool {
     return null;
   }
 
+  /// Exclude pathspecs matching what [isSensitivePath] refuses, so
+  /// whole-tree commands (`git show`, `git diff`, `git log -p`, `git add
+  /// -A`) neither print nor stage credential files they weren't asked for
+  /// by name.
+  static final List<String> secretExcludes = List.unmodifiable([
+    for (final dir in ['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker'])
+      ':(exclude,glob,icase)**/$dir/**',
+    for (final name in [
+      '.env',
+      '.env.*',
+      '.npmrc',
+      '.netrc',
+      '.pypirc',
+      '.git-credentials',
+      '.pgpass',
+      'credentials',
+      'credentials.json',
+      'secrets.json',
+      'service-account.json',
+      'daemon.json',
+      'id_rsa*',
+      'id_ed25519*',
+      'id_ecdsa*',
+      'id_dsa*',
+      '*.pem',
+      '*.key',
+      '*.p12',
+      '*.pfx',
+      '*.jks',
+      '*.keystore',
+      '*.kdbx',
+    ])
+      ':(exclude,glob,icase)**/$name',
+  ]);
+
+  /// [args] plus [secretExcludes] for commands that print file contents
+  /// or stage the whole tree. Public for tests.
+  static List<String> withSecretExcludes(String command, List<String> args) {
+    final bool applies = switch (command) {
+      'diff' || 'show' => true,
+      // `-p` and short clusters such as `-pw` (validated as `-p` + value).
+      'log' => args.any((a) => a.startsWith('-p') || a == '--patch'),
+      // Only when something is staged: a bare `git add` with only exclude
+      // pathspecs would stage the whole tree.
+      'add' => args.any(
+        (a) =>
+            a == '-A' ||
+            a == '--all' ||
+            a == '-u' ||
+            a == '--update' ||
+            (a != '--' && !a.startsWith('-')),
+      ),
+      _ => false,
+    };
+    return applies ? [...args, ...secretExcludes] : args;
+  }
+
+  /// Whether commit [args] ask to stage all tracked changes (`-a`,
+  /// `--all`, or a short cluster such as `-am`).
+  static bool commitStagesAll(List<String> args) =>
+      !_listEquals(withoutCommitAll(args), args);
+
+  /// Commit [args] without the stage-all flag (`-am` becomes `-m`). The
+  /// value after `-m` / `--message` is left alone.
+  static List<String> withoutCommitAll(List<String> args) {
+    final out = <String>[];
+    var isValue = false;
+    for (final a in args) {
+      if (isValue) {
+        isValue = false;
+        out.add(a);
+        continue;
+      }
+      if (a == '-m' || a == '--message') isValue = true;
+      if (a == '--all' || a == '-a') continue;
+      // `-am`: -a then -m. (`-ma` is -m with the value "a".)
+      if (RegExp(r'^-a[a-zA-Z]+$').hasMatch(a)) {
+        final rest = '-${a.substring(2)}';
+        if (rest == '-m') isValue = true;
+        out.add(rest);
+        continue;
+      }
+      out.add(a);
+    }
+    return out;
+  }
+
+  static bool _listEquals(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   @override
   String get name => 'git';
 
@@ -551,23 +646,39 @@ class GitTool extends HarnessTool {
       args.addAll(['-m', message]);
     }
     final noHooks = await sandbox.pathInside('.agent-harness-no-hooks');
-    try {
-      final out = await sandbox.run(
-        'git',
-        [
-          '-c', 'core.hooksPath=$noHooks',
-          '-c', 'core.fsmonitor=false',
-          // No transports that run programs or read arbitrary local paths.
-          '-c', 'protocol.ext.allow=never',
-          '-c', 'protocol.file.allow=never',
-          '--no-pager',
-          command,
-          ...args,
+    Future<ProcessOutput> git(String command, List<String> args) => sandbox.run(
+      'git',
+      [
+        '-c', 'core.hooksPath=$noHooks',
+        '-c', 'core.fsmonitor=false',
+        // No transports that run programs or read arbitrary local paths.
+        '-c', 'protocol.ext.allow=never',
+        '-c', 'protocol.file.allow=never',
+        '--no-pager',
+        command,
+        // No external diff or textconv programs from repository config.
+        if (const {'diff', 'show', 'log'}.contains(command)) ...[
+          '--no-ext-diff',
+          '--no-textconv',
         ],
-        timeout: commandTimeout,
-        cancel: context.cancel,
-        environment: const {'GIT_TERMINAL_PROMPT': '0'},
-      );
+        ...withSecretExcludes(command, args),
+      ],
+      timeout: commandTimeout,
+      cancel: context.cancel,
+      environment: const {'GIT_TERMINAL_PROMPT': '0'},
+    );
+    try {
+      var commandArgs = args;
+      if (command == 'commit' && commitStagesAll(args)) {
+        // `commit -a` can't take exclude pathspecs, so stage tracked
+        // changes with them first and commit what's staged.
+        final staged = await git('add', ['-u']);
+        if (staged.exitCode != 0 || staged.timedOut) {
+          return ToolOutput.error(staged.render());
+        }
+        commandArgs = withoutCommitAll(args);
+      }
+      final out = await git(command, commandArgs);
       final text = out.render();
       return out.exitCode == 0 && !out.timedOut
           ? ToolOutput.text(text)

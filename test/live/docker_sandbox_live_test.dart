@@ -154,4 +154,30 @@ void main() {
     }, ctx());
     expect(commit.isError, isTrue, reason: '.git is mounted read-only');
   });
+
+  test('nested repositories and readOnlyPaths are read-only', () async {
+    await Directory(p.join(root.path, '.git')).create();
+    await Directory(
+      p.join(root.path, 'vendor', 'lib', '.git'),
+    ).create(recursive: true);
+    await Directory(p.join(root.path, 'skills')).create();
+    final box = DockerSandbox(
+      workspaceRoot: root.path,
+      image: 'node:22-alpine',
+      readOnlyGit: true,
+      readOnlyPaths: ['skills'],
+    );
+    for (final target in ['vendor/lib/.git/hooks', 'skills/x.md']) {
+      final out = await box.run('node', [
+        '-e',
+        "require('fs').writeFileSync('$target', 'x')",
+      ]);
+      expect(out.exitCode, isNot(0), reason: '$target should be read-only');
+    }
+    final ok = await box.run('node', [
+      '-e',
+      "require('fs').writeFileSync('free.txt', 'x')",
+    ]);
+    expect(ok.exitCode, 0, reason: ok.render());
+  });
 }

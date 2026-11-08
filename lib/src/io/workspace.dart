@@ -6,9 +6,34 @@ import 'package:path/path.dart' as p;
 /// absolute paths, device paths and symlink/junction escapes.
 class Workspace {
   final String root;
+
+  /// Workspace-relative folders or files the agent may read but never
+  /// write or delete through [resolve] with `forWrite` (for example a
+  /// skills folder inside the workspace). A [DockerSandbox] also mounts
+  /// them read-only, if they exist when a command starts: create them
+  /// first. A local terminal can still change them, and so can a Docker
+  /// one on Windows and macOS hosts, whose shared folders ignore case
+  /// (`Skills` reaches `skills` through the writable mount).
+  final List<String> readOnlyPaths;
   String? _canonicalRoot;
 
-  Workspace(this.root);
+  Workspace(this.root, {List<String> readOnlyPaths = const []})
+    : readOnlyPaths = List.unmodifiable(readOnlyPaths) {
+    for (final path in this.readOnlyPaths) {
+      final normal = p.normalize(path.trim());
+      if (normal.isEmpty ||
+          normal == '.' ||
+          p.isAbsolute(normal) ||
+          RegExp(r'^[a-zA-Z]:').hasMatch(normal) ||
+          p.split(normal).contains('..')) {
+        throw ArgumentError.value(
+          path,
+          'readOnlyPaths',
+          'Use a path inside the workspace, relative to its root',
+        );
+      }
+    }
+  }
 
   Future<String> canonicalRoot() async =>
       _canonicalRoot ??= p.normalize(
@@ -49,8 +74,30 @@ class Workspace {
       if (p.split(rel).any((s) => s.toLowerCase() == '.git')) {
         throw const WorkspaceViolation('writing inside .git is not allowed');
       }
+      for (final readOnly in await _readOnly()) {
+        if (_insideReadOnly(readOnly, joined) ||
+            _insideReadOnly(readOnly, resolved)) {
+          throw const WorkspaceViolation('this path is read-only');
+        }
+      }
     }
     return resolved;
+  }
+
+  /// [readOnlyPaths] as canonical absolute paths: each both as written and
+  /// through links, so neither spelling can be used to write. Resolved on
+  /// every call, since a link can change.
+  Future<List<String>> _readOnly() async {
+    if (readOnlyPaths.isEmpty) return const [];
+    final rootPath = await canonicalRoot();
+    final out = <String>{};
+    for (final path in readOnlyPaths) {
+      final joined = p.normalize(p.join(rootPath, path.trim()));
+      out
+        ..add(joined)
+        ..add(await _resolveExistingPrefix(joined));
+    }
+    return out.toList();
   }
 
   /// Workspace-relative display form of [absolute] (never leaks the root).
@@ -59,6 +106,13 @@ class Workspace {
 
   static bool _inside(String root, String path) =>
       p.equals(root, path) || p.isWithin(root, path);
+
+  // Windows and (by default) macOS file systems ignore case, so `Skills`
+  // and `skills` are the same folder.
+  static bool _insideReadOnly(String root, String path) {
+    if (!Platform.isWindows && !Platform.isMacOS) return _inside(root, path);
+    return _inside(root.toLowerCase(), path.toLowerCase());
+  }
 
   /// Resolves symlinks for the longest existing prefix of [path] and
   /// appends the non-existing remainder.

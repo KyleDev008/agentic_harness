@@ -113,6 +113,83 @@ void main() {
     });
   });
 
+  group('GitTool secret excludes', () {
+    test('added only where content is printed or the tree is staged', () {
+      bool excluded(String command, List<String> args) =>
+          GitTool.withSecretExcludes(
+            command,
+            args,
+          ).any((a) => a.startsWith(':(exclude'));
+      expect(excluded('diff', []), isTrue);
+      expect(excluded('show', ['HEAD']), isTrue);
+      expect(excluded('log', ['-p']), isTrue);
+      expect(excluded('log', ['--oneline']), isFalse);
+      expect(excluded('add', ['-A']), isTrue);
+      expect(excluded('add', ['src/a.dart']), isTrue);
+      expect(excluded('add', []), isFalse); // would stage everything
+      expect(excluded('status', []), isFalse);
+    });
+
+    test('commit -a is split into add -u and a plain commit', () {
+      expect(GitTool.commitStagesAll(['-a']), isTrue);
+      expect(GitTool.commitStagesAll(['-am', 'msg']), isTrue);
+      expect(GitTool.commitStagesAll(['--all']), isTrue);
+      expect(GitTool.commitStagesAll(['-m', '-a']), isFalse); // a message
+      expect(GitTool.commitStagesAll(['-ma']), isFalse); // -m "a"
+      expect(GitTool.commitStagesAll(['--amend', '--no-edit']), isFalse);
+      expect(GitTool.withoutCommitAll(['-am', 'msg', '-a']), ['-m', 'msg']);
+    });
+
+    test('whole-tree show, diff and add skip credential files', () async {
+      Future<ProcessResult> git(List<String> args) =>
+          Process.run('git', args, workingDirectory: root.path);
+      if ((await git(['init', '-q'])).exitCode != 0) {
+        markTestSkipped('git is not installed');
+        return;
+      }
+      await git(['config', 'user.email', 't@t']);
+      await git(['config', 'user.name', 't']);
+      await git(['config', 'core.autocrlf', 'false']);
+      await File(p.join(root.path, '.env')).writeAsString('TOKEN=one\n');
+      await Directory(p.join(root.path, 'keys')).create();
+      await File(p.join(root.path, 'keys', 'Server.PEM')).writeAsString('K\n');
+      await git(['add', '-A']);
+      await git(['commit', '-qm', 'init']);
+      await File(p.join(root.path, '.env')).writeAsString('TOKEN=two\n');
+      await File(p.join(root.path, 'a.txt')).writeAsString('changed');
+      await File(p.join(root.path, '.env.local')).writeAsString('X=1\n');
+
+      final tool = GitTool(workspaceRoot: root.path);
+      final show = await tool.call({
+        'command': 'show',
+        'args': ['HEAD'],
+      }, ctx());
+      expect(show.isError, isFalse, reason: show.text);
+      expect(show.text, contains('a.txt'));
+      expect(show.text, isNot(contains('TOKEN')));
+      expect(show.text, isNot(contains('Server.PEM')));
+      final diff = await tool.call({'command': 'diff'}, ctx());
+      expect(diff.text, contains('changed'));
+      expect(diff.text, isNot(contains('TOKEN')));
+      await tool.call({
+        'command': 'add',
+        'args': ['-A'],
+      }, ctx());
+      final staged = await git(['diff', '--cached', '--name-only']);
+      expect('${staged.stdout}'.trim(), 'a.txt');
+
+      await git(['reset', '-q']);
+      final commit = await tool.call({
+        'command': 'commit',
+        'args': ['-a'],
+        'message': 'all',
+      }, ctx());
+      expect(commit.isError, isFalse, reason: commit.text);
+      final committed = await git(['show', '--name-only', '--format=']);
+      expect('${committed.stdout}'.trim(), 'a.txt');
+    });
+  });
+
   group('review regressions (io)', () {
     test('git rejects abbreviated options, absolute paths and URLs', () {
       expect(GitTool.validateArgs('log', ['--outp=x']), isNotNull);

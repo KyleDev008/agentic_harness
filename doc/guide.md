@@ -133,7 +133,7 @@ McpClient(McpStdioTransport('npx', arguments: ['-y', '@acme/mcp-server']))
 ```
 
 - **Versions:** the client speaks the stateless 2026-07-28 protocol and falls back to the `initialize` handshake (2025-11-25, 2025-06-18, 2025-03-26) for older servers. It declares no client capabilities, so servers don't send sampling, roots or elicitation requests.
-- **Untrusted servers:** remote endpoints must use https. A stdio server gets only basic variables such as `PATH` and `HOME`, plus `environment`, so set `includeParentEnvironment: true` only for servers you trust. `prefix` is required so a server can't take another tool's name; use `''` to opt out. `onToolsChanged` lets you refuse tool definitions that change after first use.
+- **Untrusted servers:** remote endpoints must use https. When a user types the endpoint, pass `endpointGuard: const NetGuard().check` (from `io_tools.dart`) so it can't point at loopback, private or cloud-metadata addresses. A stdio server gets only basic variables such as `PATH` and `HOME`, plus `environment`, so set `includeParentEnvironment: true` only for servers you trust. `prefix` is required so a server can't take another tool's name; use `''` to opt out. `onToolsChanged` lets you refuse tool definitions that change after first use.
 - **Annotations are untrusted.** By default every MCP tool is treated as destructive and open-world, so the standard policy asks before each call. Pass `trustAnnotations: true` only for servers you control: a `readOnlyHint` then skips approval.
 - **Output:** text and images go to the model. Audio and resources become short notes. `structuredContent` is the host-facing `structured` value.
 - **Lifecycle:** the tool list is cached for `cacheFor` (5 minutes by default), and `invalidate()` drops it. Call `close()` when you're done, which also stops a stdio server process.
@@ -195,7 +195,7 @@ final agent = AgentSpec(name: 'support', instructions: '…', model: claude, too
 - `SKILL.md` uses front matter with `name` (a-z, 0-9, `-`) and `description`, then the instructions. `DirectorySkillSource` treats each subfolder with a `SKILL.md` as a skill and its other text files (not hidden, no links, up to 4 levels) as files; reads are confined to the folder and capped.
 - The index, instructions and files are capped (`maxIndexChars`, `maxContentChars`). A source that fails is logged and tried again on the next run; the other skills stay available.
 - `SKILL.md` front matter supports single-line values and `>` / `|` block values (a UTF-8 BOM is fine); an unclosed front matter block is an error.
-- Skills are host content: they reach the model as tool results with system-prompt-like authority, so load only skills you wrote or reviewed, and keep skill folders out of reach of the agent's own write tools. Loading one doesn't count as reading private data unless you set `SkillSet(containsPrivateData: true)` (for skills built from the user's own notes).
+- Skills are host content: they reach the model as tool results with system-prompt-like authority, so load only skills you wrote or reviewed, and keep skill folders out of reach of the agent's own write tools: outside the workspace, or listed in the sandbox's `readOnlyPaths` (a local terminal can still change them; a Docker one can't). Loading one doesn't count as reading private data unless you set `SkillSet(containsPrivateData: true)` (for skills built from the user's own notes).
 
 ## Handoffs and subagents
 
@@ -339,9 +339,10 @@ final tools = [FileSystemTool(sandbox: box), GitTool(sandbox: box), BuildTestToo
   - no network unless `network` says so (`bridge` can reach your LAN and cloud metadata endpoints; `host` needs `allowHostNetwork`);
   - all Linux capabilities dropped, no privilege escalation, and a non-root user: `user`, else this process's own uid:gid on Linux and macOS (`runAsRoot` only with rootless Docker or userns-remap);
   - read-only root filesystem with a writable `/tmp` (also `HOME`); memory without extra swap, CPU, process, open-file and file-size limits;
-  - labelled and removed with `docker rm -f` (retried) on timeout or cancel; host paths are replaced by `/workspace` in the output.
+  - labelled and removed with `docker rm -f` (retried) on timeout or cancel; host paths are replaced by `/workspace` in the output;
+  - `available()` logs a warning when the engine has no seccomp profile or runs it unconfined (`securityWarnings()` returns the same).
 - Files are read and written on the host through the same confinement as `LocalSandbox`. The image needs the programs the agent runs (for example `git`); pin it by digest.
-- **What it doesn't protect:** the container can change everything in the mounted folder, including `.git` hooks and config, build scripts and IDE settings that run on the host later. Point it at a throwaway copy or worktree and review the diff, or set `readOnlyGit: true` when the agent doesn't need to commit. Containers share the host kernel (Docker Desktop adds a VM); for hostile code prefer a VM-backed runtime or a remote sandbox. The sensitive-file check is a guardrail: a terminal with no allow-list can still `cat` anything in the folder.
+- **What it doesn't protect:** the container can change everything in the mounted folder, including `.git` hooks and config, build scripts and IDE settings that run on the host later. Point it at a throwaway copy or worktree and review the diff, or set `readOnlyGit: true` when the agent doesn't need to commit (it covers nested repositories too). `readOnlyPaths` mounts other folders read-only, such as a skills folder inside the workspace. Containers share the host kernel (Docker Desktop adds a VM); for hostile code prefer a VM-backed runtime or a remote sandbox. The sensitive-file check is a guardrail: a terminal with no allow-list can still `cat` anything in the folder.
 - Implement `Sandbox` to use a remote sandbox service: paths come in workspace-relative and already validated by `resolve`, which must refuse escapes.
 
 ## Events

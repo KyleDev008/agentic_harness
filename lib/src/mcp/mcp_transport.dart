@@ -130,6 +130,13 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
   /// Largest total SSE stream accepted for one request.
   final int maxStreamBytes;
 
+  /// Checked before every request; throw to refuse it. Pass
+  /// `const NetGuard().check` (from `io_tools.dart`) when the endpoint
+  /// comes from a user or another untrusted source, so it can't reach
+  /// loopback, private or cloud-metadata addresses. Runs per request
+  /// because the host may resolve differently later.
+  final FutureOr<void> Function(Uri endpoint)? endpointGuard;
+
   final http.Client _client;
   final bool _ownsClient;
   String? _sessionId;
@@ -148,6 +155,7 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
     this.readTimeout = const Duration(minutes: 5),
     this.maxResponseBytes = 4 * 1024 * 1024,
     this.maxStreamBytes = 32 * 1024 * 1024,
+    this.endpointGuard,
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null {
     if (endpoint.scheme != 'https' && endpoint.scheme != 'http') {
@@ -267,6 +275,13 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
     Completer<void> abort, {
     String method = 'POST',
   }) async {
+    if (endpointGuard case final guard?) {
+      try {
+        await guard(endpoint);
+      } catch (e) {
+        throw McpTransportError('Refused ${endpoint.host}: $e');
+      }
+    }
     final request = http.AbortableRequest(
       method,
       endpoint,

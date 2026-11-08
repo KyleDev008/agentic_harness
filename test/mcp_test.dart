@@ -311,6 +311,40 @@ void main() {
       expect(requests, 1);
     });
 
+    test('endpointGuard refuses before any request is sent', () async {
+      var requests = 0;
+      final mock = MockClient((request) async {
+        requests++;
+        return http.Response('{}', 200);
+      });
+      final guarded = McpClient(
+        McpHttpTransport(
+          Uri.parse('http://127.0.0.1:9/mcp'),
+          client: mock,
+          endpointGuard: const NetGuard().check,
+        ),
+      );
+      await expectLater(
+        guarded.connect(),
+        throwsA(predicate((e) => '$e'.contains('private or local'))),
+      );
+      expect(requests, 0);
+
+      // The guard runs per request, with the endpoint.
+      final checked = <Uri>[];
+      final server = FakeServer();
+      final allowed = McpClient(
+        McpHttpTransport(
+          Uri.parse('https://mcp.test/mcp'),
+          client: server.client,
+          endpointGuard: checked.add,
+        ),
+      );
+      await allowed.connect();
+      expect(checked, isNotEmpty);
+      expect(checked.every((u) => u.host == 'mcp.test'), isTrue);
+    });
+
     test('cancelling a call aborts the request', () async {
       final gate = Completer<void>();
       final client = McpClient(
