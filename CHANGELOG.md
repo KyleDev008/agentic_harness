@@ -9,6 +9,20 @@ Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projec
 
 ## Unreleased
 
+### Added
+
+- `RunState.toSignedJson(key)` / `RunState.fromSignedJson(json, key)`: run state signed with HMAC-SHA256, for hosts that store it where others could edit it. An edited state, or one signed with another key, is refused. Adds a dependency on `package:crypto`.
+- `PermissionPolicy.isBroaderThan(other)`: whether a policy could run without asking a call that `other` would ask about or refuse.
+- `McpNotificationSource`, implemented by `McpHttpTransport` and `McpStdioTransport`: server notifications as a stream. `McpToolset` drops its cached tool list on `notifications/tools/list_changed` (over HTTP, when one arrives in a response stream).
+
+### Changed
+
+- Handoffs ask for approval (when `Handoff.requiresApproval` is null and private data was read) whenever the target agent's permissions are broader than the current agent's, not only when the target is in bypass mode.
+- An approval recorded in a paused run applies only to the tool definition the user saw. If the tool's description, schema or annotations changed before the run resumes, the call isn't run and the model is told to call it again, which asks again. `ApprovalInterruption.toolFingerprint` carries the definition's fingerprint.
+- `OpenAiChatClient` recognises the same reasoning models as `OpenAiResponsesClient` (now including `gpt-6` and later), so it sends `max_completion_tokens` and no sampling parameters for them. The two clients share their endpoint, header and plaintext-key helpers.
+- Live tests (real APIs or a real Docker engine) are tagged `live` and skipped by default; run them with `dart test -t live --run-skipped`. `test/live/docker_sandbox_live_test.dart` covers the Docker sandbox. `test/live/providers_live_test.dart` checks the Anthropic and OpenAI Responses request formats through the free token-counting endpoints (including compaction plus both clearing edits in one `edits` array) and streams one 16-token answer per provider; each provider skips without its API key.
+- Dev dependencies: `test` is now `^1.28.0` and `frontend_server_client` has a `^4.0.0` floor, so `dart pub downgrade` resolves versions that run on current SDKs.
+
 ### Fixed
 
 - `DockerSandbox` on Windows runs containers as `1000:1000` by default instead of the image's user (usually root). Docker Desktop lets any container user write to the workspace, so nothing else changes; pass `runAsRoot: true` for the old behaviour.
@@ -17,11 +31,6 @@ Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projec
 - `DockerSandbox` logs a warning when it can't remove a container after 5 attempts (`DockerSandbox.reapOrphans()` clears leftovers), and no longer spends about 2 seconds retrying when Docker isn't installed.
 - Resuming a run that was about to hand off to an agent the spec no longer includes throws an `ArgumentError` instead of silently staying with the current agent.
 - `OpenAiResponsesClient` starts a new response chain when the API key or the `OpenAI-Organization` / `OpenAI-Project` header changes, instead of referring to a response the new account can't see. Transcripts saved before this update resend their full history once.
-
-### Changed
-
-- Live tests (real APIs or a real Docker engine) are tagged `live` and skipped by default; run them with `dart test -t live --run-skipped`. `test/live/docker_sandbox_live_test.dart` covers the Docker sandbox. `test/live/providers_live_test.dart` checks the Anthropic and OpenAI Responses request formats through the free token-counting endpoints (including compaction plus both clearing edits in one `edits` array) and streams one 16-token answer per provider; each provider skips without its API key.
-- Dev dependencies: `test` is now `^1.28.0` and `frontend_server_client` has a `^4.0.0` floor, so `dart pub downgrade` resolves versions that run on current SDKs.
 
 ## 2.0.1 - 2026-10-28
 

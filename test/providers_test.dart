@@ -687,4 +687,35 @@ void main() {
       expect(errorFromStatus(500, 'oops', {}).isRetryable, isFalse);
     });
   });
+
+  test('both OpenAI clients recognise the same reasoning models', () {
+    for (final (model, reasoning) in [
+      ('o3', true),
+      ('openai/o4-mini', true),
+      ('gpt-5.5', true),
+      ('gpt-6-astra', true),
+      ('gpt-10', true),
+      ('gpt-4.1', false),
+      ('gpt-4o', false),
+      ('llama3', false),
+    ]) {
+      expect(
+        OpenAiChatConfig(model: model).isReasoningModel,
+        reasoning,
+        reason: model,
+      );
+      expect(
+        OpenAiResponsesConfig(model: model).isReasoningModel,
+        reasoning,
+        reason: model,
+      );
+    }
+    expect(
+      const OpenAiChatConfig(
+        model: 'gpt-4.1',
+        reasoningModel: true,
+      ).isReasoningModel,
+      isTrue,
+    );
+  });
 }

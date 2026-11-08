@@ -10,6 +10,7 @@ import '../core/usage.dart';
 import '../model/http_transport.dart';
 import '../model/model_client.dart';
 import '../model/tool_call_accumulator.dart';
+import 'openai_common.dart';
 
 /// Configuration for [OpenAiResponsesClient].
 final class OpenAiResponsesConfig {
@@ -74,11 +75,7 @@ final class OpenAiResponsesConfig {
     this.vision = true,
   }) : assert(!chainResponses || store, 'chainResponses requires store');
 
-  bool get isReasoningModel {
-    if (reasoningModel != null) return reasoningModel!;
-    final name = model.toLowerCase().split('/').last;
-    return RegExp(r'^(o\d|gpt-[5-9]|gpt-\d{2})').hasMatch(name);
-  }
+  bool get isReasoningModel => reasoningModel ?? isOpenAiReasoningModel(model);
 }
 
 /// [ModelClient] for the OpenAI Responses API (`/v1/responses`).
@@ -138,15 +135,7 @@ class OpenAiResponsesClient implements ModelClient {
     CancelToken? cancel,
   }) async* {
     final uri = _endpoint();
-    if (uri.scheme == 'http' &&
-        (config.apiKey ?? '').isNotEmpty &&
-        !_isLoopback(uri.host)) {
-      developer.log(
-        'API key will be sent over plaintext HTTP to ${uri.host}',
-        name: _log,
-        level: 900,
-      );
-    }
+    warnIfPlaintextKey(uri, config.apiKey, _log);
     // A chained request whose stored response is gone (expired after 30
     // days, deleted, or another project) is sent again with the full
     // history, as long as nothing has been streamed yet.
@@ -556,37 +545,14 @@ class OpenAiResponsesClient implements ModelClient {
     );
   }
 
-  Uri _endpoint() {
-    var base = config.baseUrl.trim();
-    while (base.endsWith('/')) {
-      base = base.substring(0, base.length - 1);
-    }
-    final uri = Uri.parse('$base/responses');
-    return config.queryParameters.isEmpty
-        ? uri
-        : uri.replace(
-          queryParameters: {...uri.queryParameters, ...config.queryParameters},
-        );
-  }
+  Uri _endpoint() =>
+      openAiEndpoint(config.baseUrl, 'responses', config.queryParameters);
 
-  Map<String, String> _headers() {
-    final key = config.apiKey;
-    return {
-      'Accept': 'text/event-stream',
-      if (key != null && key.isNotEmpty)
-        config.apiKeyHeader:
-            config.apiKeyHeader.toLowerCase() == 'authorization'
-                ? 'Bearer $key'
-                : key,
-      ...config.headers,
-    };
-  }
-
-  static bool _isLoopback(String host) =>
-      host == 'localhost' ||
-      host == '127.0.0.1' ||
-      host == '::1' ||
-      host == '[::1]';
+  Map<String, String> _headers() => openAiHeaders(
+    apiKey: config.apiKey,
+    apiKeyHeader: config.apiKeyHeader,
+    headers: config.headers,
+  );
 
   @override
   Future<void> close() async => _transport.close();

@@ -26,6 +26,9 @@ class FakeServer {
   int sessionsStarted = 0;
   bool expireNext = false;
 
+  /// Send `notifications/tools/list_changed` in the next SSE response.
+  bool announceToolsChanged = false;
+
   late final http.Client client = MockClient.streaming((request, body) async {
     final text = await body.bytesToString();
     final message = jsonDecode(text) as Map<String, Object?>;
@@ -121,6 +124,8 @@ class FakeServer {
     if (result == null) return _json(legacy ? 400 : 404, response);
     if (!sse) return _json(200, response);
     final events = [
+      if (announceToolsChanged)
+        'data: ${jsonEncode({'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'})}\n\n',
       // A notification and a server ping come before the response.
       'data: ${jsonEncode({'jsonrpc': '2.0', 'method': 'notifications/progress', 'params': {}})}\n\n',
       'data: ${jsonEncode({'jsonrpc': '2.0', 'id': 'srv-1', 'method': 'ping'})}\n\n',
@@ -350,6 +355,27 @@ void main() {
       expect(tools.first.displayLabel(const {}), 'Docs search docs…');
       // Cached for the next run.
       expect(identical(await toolset.listTools(), tools), isTrue);
+    });
+
+    test('a tools/list_changed notification drops the cache', () async {
+      final server = FakeServer(sse: true);
+      final client = clientFor(server);
+      final toolset = McpToolset(client, prefix: 'docs');
+      int listings() => server.methods.where((m) => m == 'tools/list').length;
+
+      await toolset.listTools();
+      final before = listings();
+      await toolset.listTools();
+      expect(listings(), before, reason: 'cached');
+
+      server.announceToolsChanged = true;
+      await client.listTools(); // any response can carry the notification
+      server.announceToolsChanged = false;
+      await Future<void>.delayed(Duration.zero);
+      final afterNotice = listings();
+      await toolset.listTools();
+      expect(listings(), greaterThan(afterNotice), reason: 'refetched');
+      await toolset.close();
     });
 
     test('annotations are ignored unless trusted', () async {

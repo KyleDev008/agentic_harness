@@ -38,7 +38,7 @@ items:
           allowlist, size caps, server titles kept out of permission
           labels, required prefix, onToolsChanged). 22 tests.
     follow_ups:
-      - Handle notifications/tools/list_changed (needs a listening stream)
+      - Listen on a GET stream for notifications between requests (list_changed is handled when it arrives in a response stream or over stdio)
       - OAuth 2.1 authorization flow (headerProvider covers static/refreshed tokens)
       - Resources, prompts and elicitation (input_required) support
       - Optional SSRF guard for user-supplied endpoints
@@ -78,8 +78,6 @@ items:
           against the transcript; at-least-once and trust model documented).
           18 tests.
     follow_ups:
-      - Optional signed state (HMAC over toJson) for hosts that store it outside the app
-      - Fingerprint the tool definition in an approval and re-ask if it changed
       - Checkpoint mid-turn (after each tool) to avoid re-running tools after a crash
     released_in: null
 
@@ -162,7 +160,6 @@ items:
           is resent once with the full history. 19 tests.
     follow_ups:
       - Built-in tools (web_search, file_search, code_interpreter) and MCP via the Responses tools array
-      - Share endpoint/header/reasoning-model helpers with OpenAiChatClient
       - Run test/live/providers_live_test.dart with a key (written; free format checks + one 16-token stream)
     released_in: null
 

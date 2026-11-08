@@ -122,6 +122,57 @@ final class PermissionPolicy {
   /// Allows everything — for tests and fully trusted tool sets.
   static const allowAll = PermissionPolicy(mode: PermissionMode.bypass);
 
+  /// Whether this policy could run a call without asking that [other]
+  /// would ask about or refuse: a more permissive [mode], an allow rule
+  /// [other] has no equal or wider version of, or a deny or ask rule of
+  /// [other] that this policy lacks.
+  ///
+  /// Conservative: rules are compared by tool pattern (`*` covers every
+  /// pattern), and a rule with a `when` predicate is only covered by an
+  /// unconditional rule or the identical predicate. [canUseTool] is not
+  /// compared.
+  bool isBroaderThan(PermissionPolicy other) {
+    int rank(PermissionMode m) => switch (m) {
+      PermissionMode.strict => 0,
+      PermissionMode.standard => 1,
+      PermissionMode.bypass => 2,
+    };
+    if (rank(mode) > rank(other.mode)) return true;
+
+    /// Whether [policy] has a [behaviors] rule at least as wide as [rule].
+    bool covered(
+      PermissionPolicy policy,
+      PermissionRule rule,
+      Set<PermissionBehavior> behaviors,
+    ) => policy.rules.any(
+      (r) =>
+          behaviors.contains(r.behavior) &&
+          (r.toolPattern == '*' || r.toolPattern == rule.toolPattern) &&
+          (r.when == null || identical(r.when, rule.when)),
+    );
+
+    for (final rule in rules) {
+      if (rule.behavior == PermissionBehavior.allow &&
+          !covered(other, rule, const {PermissionBehavior.allow})) {
+        return true;
+      }
+    }
+    for (final rule in other.rules) {
+      final kept = switch (rule.behavior) {
+        PermissionBehavior.deny => covered(this, rule, const {
+          PermissionBehavior.deny,
+        }),
+        PermissionBehavior.ask => covered(this, rule, const {
+          PermissionBehavior.ask,
+          PermissionBehavior.deny,
+        }),
+        PermissionBehavior.allow => true,
+      };
+      if (!kept) return true;
+    }
+    return false;
+  }
+
   /// The static part of the decision (before asking the host).
   ({PermissionBehavior behavior, String? reason}) evaluate(
     ToolCallRequest call,

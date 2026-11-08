@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
+
 import '../context/context_manager.dart';
 import '../core/cancellation.dart';
 import '../core/errors.dart';
@@ -1004,8 +1006,7 @@ class _AgentRunImpl implements AgentRun {
   bool _handoffNeedsApproval(Handoff handoff) =>
       handoff.requiresApproval ??
       (_privateDataRead &&
-          handoff.agent.permissions.mode == PermissionMode.bypass &&
-          spec.permissions.mode != PermissionMode.bypass);
+          handoff.agent.permissions.isBroaderThan(spec.permissions));
 
   /// Called by a transfer tool; null when the handoff is accepted, else
   /// why not.
@@ -1778,6 +1779,7 @@ class _AgentRunImpl implements AgentRun {
             toolName: use.name,
             input: input,
             displayLabel: label,
+            toolFingerprint: _toolFingerprint(tool),
           ),
         );
       case PermissionBehavior.ask:
@@ -1872,6 +1874,16 @@ class _AgentRunImpl implements AgentRun {
     switch (pending.decision) {
       case Deny(:final message):
         return _blocked(use, message).result!;
+      case Allow()
+          when interruption is ApprovalInterruption &&
+              interruption.toolFingerprint != null &&
+              interruption.toolFingerprint != _toolFingerprint(tool):
+        // The user approved a different version of this tool.
+        return _blocked(
+          use,
+          '${use.name} changed after it was approved, so the call was not '
+          'run. Call it again to ask for approval.',
+        ).result!;
       case Allow(:final updatedInput):
         if (updatedInput != null) input = updatedInput;
       case null when interruption is ApprovalInterruption:
@@ -2430,6 +2442,24 @@ final class _HandoffTool extends HarnessTool {
 
 /// The agent a resumed state was handed to: [root] or one reachable
 /// through handoffs.
+/// Fingerprint of [tool]'s definition as the model and the user see it:
+/// changes when its description, input schema or static annotations do.
+String _toolFingerprint(HarnessTool tool) {
+  final a = tool.annotations;
+  return sha256
+      .convert(
+        utf8.encode(
+          jsonEncode([
+            tool.name,
+            tool.description,
+            tool.inputSchema,
+            [a.readOnly, a.destructive, a.idempotent, a.openWorld],
+          ]),
+        ),
+      )
+      .toString();
+}
+
 AgentSpec _findAgent(AgentSpec root, RunState state) {
   final name = state._activeAgent;
   if (name == null || name == root.name) return root;

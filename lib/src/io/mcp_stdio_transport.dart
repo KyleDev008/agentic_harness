@@ -14,7 +14,12 @@ import 'process_runner.dart';
 /// exits or misbehaves, the transport fails every pending and later
 /// request; create a new client to restart the server. Not available on
 /// Android and iOS.
-class McpStdioTransport implements McpTransport {
+class McpStdioTransport implements McpTransport, McpNotificationSource {
+  final _notifications = StreamController<Map<String, Object?>>.broadcast();
+
+  @override
+  Stream<Map<String, Object?>> get notifications => _notifications.stream;
+
   final String executable;
   final List<String> arguments;
   final String? workingDirectory;
@@ -189,8 +194,11 @@ class McpStdioTransport implements McpTransport {
     final method = message['method'];
     final id = message['id'];
     if (method is String) {
+      if (id == null) {
+        if (!_notifications.isClosed) _notifications.add(message);
+        return;
+      }
       // A server request: answer pings, refuse everything else.
-      if (id == null) return;
       _write({
         'jsonrpc': '2.0',
         'id': id,
@@ -291,6 +299,7 @@ class McpStdioTransport implements McpTransport {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    unawaited(_notifications.close());
     _fail('Transport closed');
     final starting = _starting;
     if (starting == null) return;

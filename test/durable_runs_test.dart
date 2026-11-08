@@ -67,6 +67,13 @@ class TwoQuestionTool extends HarnessTool {
   }
 }
 
+/// A [RecordingTool] whose definition changed (new description).
+class ChangedRecordingTool extends RecordingTool {
+  ChangedRecordingTool(super.name, {super.readOnly});
+  @override
+  String get description => 'Records its input, and also emails it';
+}
+
 /// A [TwoQuestionTool] that writes, so it needs approval first.
 class ApprovedSurveyTool extends TwoQuestionTool {
   @override
@@ -630,6 +637,102 @@ void main() {
           jsonDecode(jsonEncode(first.state!.toJson())) as Map<String, Object?>;
       (json['messages'] as List).removeLast();
       expect(() => RunState.fromJson(json), throwsFormatException);
+    });
+  });
+
+  group('approved tool definition', () {
+    Future<RunState> pausedAtWrite() async {
+      final model = FakeModelClient([
+        FakeTurn.tools([
+          const FakeToolCall('w', 'write', {'text': 'x'}),
+        ]),
+      ]);
+      final first = await finish(
+        const Runner().run(
+          agent(model, [RecordingTool('write', readOnly: false)]),
+          input: AgentMessage.user('go'),
+          config: interruptible,
+        ),
+      );
+      final interruption = first.interruption as ApprovalInterruption;
+      expect(interruption.toolFingerprint, isNotNull);
+      return roundTrip(first.state!);
+    }
+
+    test('an unchanged tool runs with the recorded approval', () async {
+      final saved = await pausedAtWrite();
+      final write = RecordingTool('write', readOnly: false);
+      final model = FakeModelClient([FakeTurn.text('done')]);
+      await finish(
+        const Runner().resume(agent(model, [write]), saved.approve()),
+      );
+      expect(write.calls, hasLength(1));
+    });
+
+    test('a changed tool is not run on an old approval', () async {
+      final saved = await pausedAtWrite();
+      final write = ChangedRecordingTool('write', readOnly: false);
+      final model = FakeModelClient([FakeTurn.text('done')]);
+      await finish(
+        const Runner().resume(agent(model, [write]), saved.approve()),
+      );
+      expect(write.calls, isEmpty);
+      expect(
+        model.lastToolResults(0).single.text,
+        contains('changed after it was approved'),
+      );
+    });
+  });
+
+  group('signed state', () {
+    final key = List<int>.generate(32, (i) => i * 7 % 256);
+
+    Future<RunState> paused() async {
+      final model = FakeModelClient([
+        FakeTurn.tools([
+          const FakeToolCall('w', 'write', {'text': 'x'}),
+        ]),
+      ]);
+      final result = await finish(
+        const Runner().run(
+          agent(model, [RecordingTool('write', readOnly: false)]),
+          input: AgentMessage.user('go'),
+          config: interruptible,
+        ),
+      );
+      return result.state!;
+    }
+
+    test('round-trips through JSON with the same key', () async {
+      final state = await paused();
+      final stored = jsonDecode(jsonEncode(state.toSignedJson(key)));
+      final back = RunState.fromSignedJson(stored as Map<String, Object?>, key);
+      expect(back.runId, state.runId);
+      expect(back.interruption, isA<ApprovalInterruption>());
+    });
+
+    test('an edited state or another key is refused', () async {
+      final state = await paused();
+      final signed = state.approve().toSignedJson(key);
+      final edited = {
+        ...signed,
+        'signedState': (signed['signedState'] as String).replaceFirst(
+          '"turns":1',
+          '"turns":0',
+        ),
+      };
+      expect(edited['signedState'], isNot(signed['signedState']));
+      expect(() => RunState.fromSignedJson(edited, key), throwsFormatException);
+      final otherKey = List<int>.filled(32, 1);
+      expect(
+        () => RunState.fromSignedJson(signed, otherKey),
+        throwsFormatException,
+      );
+      expect(
+        () => RunState.fromSignedJson(state.toJson(), key),
+        throwsFormatException,
+      );
+      expect(() => state.toSignedJson([1, 2, 3]), throwsArgumentError);
     });
   });
 }

@@ -687,4 +687,71 @@ void main() {
       expect(model.requests.last.messages.last.text, contains('were stopped'));
     });
   });
+
+  group('PermissionPolicy.isBroaderThan', () {
+    const allow = PermissionBehavior.allow;
+    const ask = PermissionBehavior.ask;
+    const deny = PermissionBehavior.deny;
+    bool broader(PermissionPolicy a, PermissionPolicy b) => a.isBroaderThan(b);
+
+    test('a more permissive mode is broader', () {
+      const strict = PermissionPolicy(mode: PermissionMode.strict);
+      const standard = PermissionPolicy();
+      expect(broader(standard, strict), isTrue);
+      expect(broader(PermissionPolicy.allowAll, standard), isTrue);
+      expect(broader(strict, standard), isFalse);
+      expect(broader(standard, standard), isFalse);
+    });
+
+    test('an extra allow rule is broader, unless already covered', () {
+      const web = PermissionPolicy(rules: [PermissionRule('web_fetch', allow)]);
+      expect(broader(web, const PermissionPolicy()), isTrue);
+      expect(broader(web, web), isFalse);
+      expect(
+        broader(
+          web,
+          const PermissionPolicy(rules: [PermissionRule('*', allow)]),
+        ),
+        isFalse,
+      );
+    });
+
+    test('dropping a deny or ask rule is broader', () {
+      const guarded = PermissionPolicy(
+        rules: [PermissionRule('shell', deny), PermissionRule('http', ask)],
+      );
+      expect(broader(const PermissionPolicy(), guarded), isTrue);
+      expect(
+        broader(
+          const PermissionPolicy(
+            rules: [
+              PermissionRule('shell', deny),
+              PermissionRule('http', deny),
+            ],
+          ),
+          guarded,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a conditional rule is only covered by the same predicate', () {
+      bool writes(Map<String, Object?> input) => input['action'] == 'write';
+      final a = PermissionPolicy(
+        rules: [PermissionRule('files', deny, when: writes)],
+      );
+      final b = PermissionPolicy(
+        rules: [PermissionRule('files', deny, when: (_) => true)],
+      );
+      expect(broader(b, a), isTrue);
+      expect(broader(a, a), isFalse);
+      expect(
+        broader(
+          const PermissionPolicy(rules: [PermissionRule('files', deny)]),
+          a,
+        ),
+        isFalse,
+      );
+    });
+  });
 }

@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:developer' as developer;
 
 import 'package:http/http.dart' as http;
 
@@ -10,6 +9,7 @@ import '../core/usage.dart';
 import '../model/http_transport.dart';
 import '../model/model_client.dart';
 import '../model/tool_call_accumulator.dart';
+import 'openai_common.dart';
 
 /// Configuration for [OpenAiChatClient].
 final class OpenAiChatConfig {
@@ -56,11 +56,7 @@ final class OpenAiChatConfig {
     this.vision = true,
   });
 
-  bool get isReasoningModel {
-    if (reasoningModel != null) return reasoningModel!;
-    final name = model.toLowerCase().split('/').last;
-    return RegExp(r'^(o\d|gpt-5)').hasMatch(name);
-  }
+  bool get isReasoningModel => reasoningModel ?? isOpenAiReasoningModel(model);
 }
 
 /// [ModelClient] for the OpenAI Chat Completions API and compatible servers
@@ -99,15 +95,7 @@ class OpenAiChatClient implements ModelClient {
     CancelToken? cancel,
   }) async* {
     final uri = _endpoint();
-    if (uri.scheme == 'http' &&
-        config.apiKey != null &&
-        !_isLoopback(uri.host)) {
-      developer.log(
-        'API key will be sent over plaintext HTTP to ${uri.host}',
-        name: _log,
-        level: 900,
-      );
-    }
+    warnIfPlaintextKey(uri, config.apiKey, _log);
     final body = buildBody(request);
     final response = await _transport.postJson(
       uri,
@@ -385,37 +373,17 @@ class OpenAiChatClient implements ModelClient {
     };
   }
 
-  Uri _endpoint() {
-    var base = config.baseUrl.trim();
-    while (base.endsWith('/')) {
-      base = base.substring(0, base.length - 1);
-    }
-    final uri = Uri.parse('$base/chat/completions');
-    return config.queryParameters.isEmpty
-        ? uri
-        : uri.replace(
-          queryParameters: {...uri.queryParameters, ...config.queryParameters},
-        );
-  }
+  Uri _endpoint() => openAiEndpoint(
+    config.baseUrl,
+    'chat/completions',
+    config.queryParameters,
+  );
 
-  Map<String, String> _headers() {
-    final key = config.apiKey;
-    return {
-      'Accept': 'text/event-stream',
-      if (key != null && key.isNotEmpty)
-        config.apiKeyHeader:
-            config.apiKeyHeader.toLowerCase() == 'authorization'
-                ? 'Bearer $key'
-                : key,
-      ...config.headers,
-    };
-  }
-
-  static bool _isLoopback(String host) =>
-      host == 'localhost' ||
-      host == '127.0.0.1' ||
-      host == '::1' ||
-      host == '[::1]';
+  Map<String, String> _headers() => openAiHeaders(
+    apiKey: config.apiKey,
+    apiKeyHeader: config.apiKeyHeader,
+    headers: config.headers,
+  );
 
   @override
   Future<void> close() async => _transport.close();

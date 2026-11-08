@@ -50,9 +50,11 @@ final class Handoff {
 
   /// Whether calling the transfer tool needs approval. Null decides per
   /// call: it asks once the run has read private data and the target's
-  /// permissions are in bypass mode while the current agent's aren't (a
-  /// prompt-injected agent could otherwise pass the conversation to a more
-  /// permissive one). True always asks; false never does.
+  /// permissions are broader than the current agent's
+  /// (`PermissionPolicy.isBroaderThan`: a more permissive mode, an extra
+  /// allow rule, or a dropped deny or ask rule) — a prompt-injected agent
+  /// could otherwise pass the conversation to a more permissive one. True
+  /// always asks; false never does.
   final bool? requiresApproval;
 
   const Handoff(

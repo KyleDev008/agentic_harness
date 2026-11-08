@@ -63,14 +63,26 @@ class McpToolset implements ToolProvider {
     this.timeout,
     this.cacheFor = const Duration(minutes: 5),
     this.maxDescriptionChars = 2000,
-  });
+  }) {
+    if (client.transport case final McpNotificationSource source) {
+      _notifications = source.notifications.listen((message) {
+        if (message['method'] == 'notifications/tools/list_changed') {
+          invalidate();
+        }
+      });
+    }
+  }
+
+  StreamSubscription<Map<String, Object?>>? _notifications;
 
   List<HarnessTool>? _cached;
   DateTime? _cachedAt;
   Future<List<HarnessTool>>? _listing;
   final Map<String, String> _fingerprints = {};
 
-  /// Drops the cached tool list (e.g. on `notifications/tools/list_changed`).
+  /// Drops the cached tool list. Done automatically on
+  /// `notifications/tools/list_changed` when the transport reports
+  /// notifications ([McpNotificationSource]).
   void invalidate() => _cached = null;
 
   @override
@@ -140,7 +152,10 @@ class McpToolset implements ToolProvider {
     return name;
   }
 
-  Future<void> close() => client.close();
+  Future<void> close() async {
+    await _notifications?.cancel();
+    await client.close();
+  }
 }
 
 /// One MCP server tool as a [HarnessTool].

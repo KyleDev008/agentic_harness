@@ -37,11 +37,13 @@ sealed class RunInterruption {
     final displayLabel = _string(json, 'displayLabel');
     switch (json['kind']) {
       case 'approval':
+        final fingerprint = json['toolFingerprint'];
         return ApprovalInterruption(
           toolUseId: toolUseId,
           toolName: toolName,
           input: input,
           displayLabel: displayLabel,
+          toolFingerprint: fingerprint is String ? fingerprint : null,
         );
       case 'input':
         final choices = json['choices'];
@@ -73,15 +75,27 @@ sealed class RunInterruption {
 /// The run needs approval for a tool call. Resume with
 /// [RunState.approve] or [RunState.reject].
 final class ApprovalInterruption extends RunInterruption {
+  /// Fingerprint of the tool's definition (description, schema and
+  /// annotations) when approval was asked. If the tool changes before the
+  /// run resumes, the recorded approval no longer applies and the call is
+  /// not run. `null` in states saved before 2.1.
+  final String? toolFingerprint;
+
   const ApprovalInterruption({
     required super.toolUseId,
     required super.toolName,
     required super.input,
     required super.displayLabel,
+    this.toolFingerprint,
   });
 
   @override
   String get kind => 'approval';
+
+  @override
+  Map<String, Object?> _fields() => {
+    if (toolFingerprint != null) 'toolFingerprint': toolFingerprint,
+  };
 }
 
 /// A tool asked the user a question. Resume with [RunState.answer].
@@ -126,11 +140,16 @@ final class InputInterruption extends RunInterruption {
 /// `runState`.
 ///
 /// The state holds the full transcript and the user's answers, so store it
-/// as carefully as the conversation itself. It is not signed: anyone who
-/// can edit the stored state can record an approval, reset the budgets or
-/// change what the run resumes with. On resume the pending call is
-/// validated and checked against the permission rules again, but a
-/// recorded approval is trusted.
+/// as carefully as the conversation itself. [toJson] is not signed: anyone
+/// who can edit the stored state can record an approval, reset the budgets
+/// or change what the run resumes with. Where others could edit it, store
+/// [toSignedJson] instead and read it with [RunState.fromSignedJson].
+///
+/// On resume the pending call is validated and checked against the
+/// permission rules again. A recorded approval is trusted only while the
+/// tool's definition (description, schema, annotations) is unchanged; if
+/// the tool changed, the call is not run and the model is told to call it
+/// again, which asks again.
 ///
 /// Resuming is at-least-once: resuming the same state twice runs the
 /// pending call twice, so mark a state as used before resuming it.
@@ -304,6 +323,60 @@ final class RunState {
     if (_lostBackground.isNotEmpty) 'lostBackground': _lostBackground,
     if (_loadedTools.isNotEmpty) 'loadedTools': _loadedTools,
   };
+
+  /// [toJson] signed with HMAC-SHA256 under [key], for state stored where
+  /// someone other than this process could edit it (a database, a file
+  /// another app can write, a server). The state travels as a string so
+  /// the signature covers its exact bytes. Read it back with
+  /// [RunState.fromSignedJson] and the same key.
+  ///
+  /// Use a random key of at least 32 bytes kept in secure storage, never
+  /// stored next to the state.
+  Map<String, Object?> toSignedJson(List<int> key) {
+    _checkKey(key);
+    final state = jsonEncode(toJson());
+    return {
+      'signedState': state,
+      'hmac': Hmac(sha256, key).convert(utf8.encode(state)).toString(),
+    };
+  }
+
+  /// Parses [toSignedJson] output, verifying the signature first. Throws
+  /// [FormatException] when the signature is missing or doesn't match
+  /// (the state was changed, or signed with another key).
+  factory RunState.fromSignedJson(Map<String, Object?> json, List<int> key) {
+    _checkKey(key);
+    final state = json['signedState'];
+    final mac = json['hmac'];
+    if (state is! String || mac is! String) {
+      throw const FormatException('Run state: not a signed state');
+    }
+    final expected = Hmac(sha256, key).convert(utf8.encode(state)).toString();
+    if (!_constantTimeEquals(expected, mac.toLowerCase())) {
+      throw const FormatException('Run state: signature does not match');
+    }
+    final decoded = jsonDecode(state);
+    return RunState.fromJson(_map(decoded, 'signedState'));
+  }
+
+  static void _checkKey(List<int> key) {
+    if (key.length < 32) {
+      throw ArgumentError.value(
+        key.length,
+        'key',
+        'Use a key of at least 32 bytes',
+      );
+    }
+  }
+
+  static bool _constantTimeEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
+  }
 
   /// Parses [toJson] output. Throws [FormatException] for malformed or
   /// unsupported state.

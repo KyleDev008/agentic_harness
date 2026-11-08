@@ -83,6 +83,15 @@ abstract interface class McpTransport {
   Future<void> close();
 }
 
+/// A transport that reports notifications the server sends on its own
+/// (no `id`), such as `notifications/tools/list_changed`. Optional:
+/// [McpToolset] listens when its transport implements it.
+abstract interface class McpNotificationSource {
+  /// Server notifications as JSON-RPC objects (`method`, optional
+  /// `params`). Broadcast; closed with the transport.
+  Stream<Map<String, Object?>> get notifications;
+}
+
 /// The Streamable HTTP transport.
 ///
 /// Every message is a POST to [endpoint]; the server answers with JSON or
@@ -91,8 +100,16 @@ abstract interface class McpTransport {
 /// not followed, so credentials in [headers] stay with [endpoint] (an
 /// injected browser client may still follow them). Put credentials in
 /// headers, never in the endpoint URL.
-class McpHttpTransport implements McpTransport {
+class McpHttpTransport implements McpTransport, McpNotificationSource {
   final Uri endpoint;
+
+  final _notifications = StreamController<Map<String, Object?>>.broadcast();
+
+  /// Notifications the server sends inside response streams. There is no
+  /// separate listening stream (GET), so a change is noticed with the
+  /// next request's response.
+  @override
+  Stream<Map<String, Object?>> get notifications => _notifications.stream;
 
   /// Static headers, e.g. `Authorization`.
   final Map<String, String> headers;
@@ -367,6 +384,8 @@ class McpHttpTransport implements McpTransport {
         // Legacy servers may ping over the response stream; anything else
         // is refused (no capabilities were declared).
         _reply(decoded['id'], method == 'ping', protocolVersion);
+      } else if (method is String && !_notifications.isClosed) {
+        _notifications.add(decoded.cast<String, Object?>());
       }
       return null;
     }
@@ -449,6 +468,7 @@ class McpHttpTransport implements McpTransport {
   /// Ends a legacy session (best effort) and releases the HTTP client.
   @override
   Future<void> close() async {
+    unawaited(_notifications.close());
     if (_sessionId != null) {
       final abort = Completer<void>();
       try {
