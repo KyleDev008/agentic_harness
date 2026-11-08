@@ -353,8 +353,16 @@ class _AgentRunImpl implements AgentRun {
       _emptyRetryUsed = state._emptyRetryUsed;
       _handoffs = state._handoffs;
       if (state._pendingHandoff case final name?) {
+        // The model was told the transfer was accepted; continuing without
+        // it would leave the wrong agent answering.
         _pendingHandoff =
-            _agent.handoffs.where((h) => h.agent.name == name).firstOrNull;
+            _agent.handoffs.where((h) => h.agent.name == name).firstOrNull ??
+            (throw ArgumentError.value(
+              name,
+              'state',
+              'The run was about to hand off to "$name", which '
+                  '${_agent.name}\'s handoffs no longer include',
+            ));
       }
       _lostBackground.addAll(state._lostBackground);
       _loadedTools.addAll(state._loadedTools);

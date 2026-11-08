@@ -728,6 +728,33 @@ void main() {
         ),
       );
       expect(otherModel.containsKey('previous_response_id'), isFalse);
+      // Nor does another API key or project on the same endpoint.
+      for (final other in [
+        const OpenAiResponsesConfig(
+          model: 'gpt-5.5',
+          apiKey: 'sk-other',
+          store: true,
+          chainResponses: true,
+        ),
+        const OpenAiResponsesConfig(
+          model: 'gpt-5.5',
+          headers: {'OpenAI-Project': 'proj_2'},
+          store: true,
+          chainResponses: true,
+        ),
+      ]) {
+        final body = OpenAiResponsesClient(other).buildBody(
+          ModelRequest(
+            system: 'sys',
+            messages: [
+              AgentMessage.user('hi'),
+              ...first.newMessages,
+              AgentMessage.user('next'),
+            ],
+          ),
+        );
+        expect(body.containsKey('previous_response_id'), isFalse);
+      }
     });
 
     test('reasoning effort and no summary', () {

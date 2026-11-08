@@ -470,6 +470,14 @@ class GitTool extends HarnessTool {
           arg.contains('::')) {
         return 'argument "$arg" points outside the repository';
       }
+      // Pathspec globs (`*.env`, `.en?`, `[.]env`) and magic (`:(top).env`,
+      // `:/`, `:!x`) would match credential files the name check below
+      // can't see. None of these characters is valid in a ref name, so
+      // refs, revisions and plain paths are unaffected.
+      if (arg.startsWith(':') || arg.contains(RegExp(r'[*?\[]'))) {
+        return 'argument "$arg" uses pathspec globs or magic, which are not '
+            'allowed; name files and refs literally';
+      }
       // Also the path half of `rev:path` (e.g. `HEAD:.env`).
       final colon = arg.indexOf(':');
       if (isSensitivePath(arg) ||

@@ -138,7 +138,7 @@ items:
       - On-demand compaction (compact-2026-09-04), which keeps recent turns and their thinking
       - pause_after_compaction support
       - Confirm compaction and clearing may share one edits array (docs are silent)
-      - Live test against the API (all tests use recorded shapes)
+      - Run test/live/providers_live_test.dart with a key (written; free format checks + one 16-token stream)
     released_in: null
 
   - id: openai-responses-client
@@ -163,8 +163,7 @@ items:
     follow_ups:
       - Built-in tools (web_search, file_search, code_interpreter) and MCP via the Responses tools array
       - Share endpoint/header/reasoning-model helpers with OpenAiChatClient
-      - Include the API key/project in the chaining fingerprint
-      - Live test against the API (tests use documented event shapes)
+      - Run test/live/providers_live_test.dart with a key (written; free format checks + one 16-token stream)
     released_in: null
 
   - id: tracing-and-cost
@@ -283,7 +282,6 @@ items:
           workspaceRoot or sandbox. 8 tests (Docker via an injected runner;
           not run against a live engine).
     follow_ups:
-      - Live test against a running Docker engine
       - A remote sandbox implementation (e.g. an HTTP sandbox service)
       - Copy-in workspaces (no host mount) for untrusted code
     released_in: null

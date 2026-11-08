@@ -7,6 +7,22 @@ types arrive only in major versions.
 
 Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projects.kylecox.co.za/agentic_harness/docs/).
 
+## Unreleased
+
+### Fixed
+
+- `DockerSandbox` on Windows runs containers as `1000:1000` by default instead of the image's user (usually root). Docker Desktop lets any container user write to the workspace, so nothing else changes; pass `runAsRoot: true` for the old behaviour.
+- `GitTool` refuses pathspec globs and magic (`*.env`, `.en?`, `:(top).env`, `:/`), which could reach credential files the name check didn't see.
+- `DockerSandbox` hides the workspace's host path from output on Windows in any letter case, with either slash, and when the root is given with a trailing slash.
+- `DockerSandbox` logs a warning when it can't remove a container after 5 attempts (`DockerSandbox.reapOrphans()` clears leftovers), and no longer spends about 2 seconds retrying when Docker isn't installed.
+- Resuming a run that was about to hand off to an agent the spec no longer includes throws an `ArgumentError` instead of silently staying with the current agent.
+- `OpenAiResponsesClient` starts a new response chain when the API key or the `OpenAI-Organization` / `OpenAI-Project` header changes, instead of referring to a response the new account can't see. Transcripts saved before this update resend their full history once.
+
+### Changed
+
+- Live tests (real APIs or a real Docker engine) are tagged `live` and skipped by default; run them with `dart test -t live --run-skipped`. `test/live/docker_sandbox_live_test.dart` covers the Docker sandbox. `test/live/providers_live_test.dart` checks the Anthropic and OpenAI Responses request formats through the free token-counting endpoints (including compaction plus both clearing edits in one `edits` array) and streams one 16-token answer per provider; each provider skips without its API key.
+- Dev dependencies: `test` is now `^1.28.0` and `frontend_server_client` has a `^4.0.0` floor, so `dart pub downgrade` resolves versions that run on current SDKs.
+
 ## 2.0.1 - 2026-10-28
 
 Documentation release. No code changes.

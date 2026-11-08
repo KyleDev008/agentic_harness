@@ -23,5 +23,7 @@ dependencies:
   path: ^1.9.0
 
 dev_dependencies:
+  # Floor for `dart pub downgrade`: older versions don't run on current SDKs.
+  frontend_server_client: ^4.0.0
   lints: ^5.1.0
-  test: ^1.25.0
+  test: ^1.28.0

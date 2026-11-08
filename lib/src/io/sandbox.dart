@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math';
 
@@ -211,7 +212,8 @@ typedef ProcessRunner =
 ///   [allowHostNetwork]);
 /// - all Linux capabilities dropped and no privilege escalation;
 /// - a non-root user: [user], else this process's own uid:gid on Linux
-///   and macOS (set [runAsRoot] only with rootless Docker or userns-remap);
+///   and macOS, `1000:1000` on Windows (set [runAsRoot] only with rootless
+///   Docker or userns-remap);
 /// - a read-only root filesystem with a writable `/tmp` (also `HOME`);
 /// - memory (no extra swap), CPU, process, open-file and file-size limits;
 /// - an init process, labels for [reapOrphans], and removal by name
@@ -308,7 +310,11 @@ class DockerSandbox implements Sandbox {
   /// This process's uid:gid on Linux and macOS (null on Windows, where
   /// Docker Desktop's VM owns the files).
   static String? _defaultUser() {
-    if (Platform.isWindows || !processesSupported) return null;
+    if (!processesSupported) return null;
+    // Docker Desktop's file sharing lets any container uid read and write
+    // the bind mount, so there is no host uid to match: use a fixed
+    // non-root one rather than the image's default (usually root).
+    if (Platform.isWindows) return '1000:1000';
     try {
       final uid = Process.runSync('id', ['-u']).stdout.toString().trim();
       final gid = Process.runSync('id', ['-g']).stdout.toString().trim();
@@ -504,12 +510,19 @@ class DockerSandbox implements Sandbox {
         removing ??= () async {
           for (var attempt = 0; attempt < 5; attempt++) {
             final out = await _docker(['rm', '-f', name]);
+            // Docker itself can't be run: nothing was started either.
+            if (out == null) return;
             final gone =
-                out != null &&
-                (out.exitCode == 0 || out.stderr.contains('No such container'));
+                out.exitCode == 0 || out.stderr.contains('No such container');
             if (gone && attempt > 0) return;
             await Future<void>.delayed(const Duration(milliseconds: 400));
           }
+          developer.log(
+            'Container $name could not be removed after 5 attempts; it may '
+            'still be running. DockerSandbox.reapOrphans() removes leftovers.',
+            name: 'agentic_harness.sandbox',
+            level: 900,
+          );
         }();
     final unregister = cancel?.onCancel(() => unawaited(remove()));
     try {
@@ -534,7 +547,8 @@ class DockerSandbox implements Sandbox {
       }
       if (out.timedOut) await remove();
       // Keep host paths out of what the model sees.
-      String redact(String s) => s.replaceAll(source, mountPoint);
+      String redact(String s) =>
+          s.replaceAll(hostPathPattern(source), mountPoint);
       return ProcessOutput(
         out.exitCode,
         redact(out.stdout),
@@ -546,6 +560,18 @@ class DockerSandbox implements Sandbox {
       unregister?.call();
       if (cancel?.isCancelled ?? false) await remove();
     }
+  }
+
+  /// Matches [root] in process output. On Windows paths are
+  /// case-insensitive and either separator works, so `C:/Work/App` and
+  /// `c:\work\app` both match `C:\Work\App`.
+  static Pattern hostPathPattern(String root, {bool? windows}) {
+    if (!(windows ?? Platform.isWindows)) return root;
+    final parts = root
+        .split(RegExp(r'[\\/]+'))
+        .where((s) => s.isNotEmpty)
+        .map(RegExp.escape);
+    return RegExp(parts.join(r'[\\/]+'), caseSensitive: false);
   }
 
   static final _random = Random.secure();

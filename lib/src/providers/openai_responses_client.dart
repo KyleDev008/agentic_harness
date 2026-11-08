@@ -348,11 +348,26 @@ class OpenAiResponsesClient implements ModelClient {
     return (i, id);
   }
 
-  /// Fingerprint of the endpoint, model, instructions and history a
-  /// response was made from (FNV-1a, two seeds; not a security hash).
+  /// Fingerprint of the endpoint, account, model, instructions and history
+  /// a response was made from (FNV-1a, two seeds; not a security hash).
+  ///
+  /// The account part (API key, organization and project headers) makes a
+  /// key or project switch start a fresh chain instead of pointing at a
+  /// response the new account can't see. The key is only mixed into the
+  /// 64-bit digest of the whole text, never stored.
   String _fingerprint(String? system, List<AgentMessage> messages) {
+    final account = [
+      config.apiKey ?? '',
+      for (final e in config.headers.entries)
+        if (const {
+          'openai-organization',
+          'openai-project',
+        }.contains(e.key.toLowerCase()))
+          '${e.key.toLowerCase()}=${e.value}',
+    ]..sort();
     final text = jsonEncode([
       config.baseUrl,
+      account,
       config.model,
       system ?? '',
       for (final m in messages) m.toJson(),

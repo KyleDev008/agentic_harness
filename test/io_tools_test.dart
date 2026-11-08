@@ -134,6 +134,22 @@ void main() {
       expect(GitTool.validateArgs('commit', ['-m', 'fix ../thing']), isNull);
       expect(GitTool.validateArgs('push', ['origin', 'feature/x']), isNull);
       expect(GitTool.validateArgs('show', ['HEAD:.env']), isNotNull);
+      // Pathspec globs and magic would reach credential files indirectly.
+      for (final spec in [
+        '*.env',
+        '.en?',
+        '[.]env',
+        ':(top).env',
+        ':/',
+        ':!x',
+      ]) {
+        expect(GitTool.validateArgs('log', ['-p', '--', spec]), isNotNull);
+      }
+      expect(GitTool.validateArgs('show', ['HEAD~2', 'HEAD@{1}']), isNull);
+      expect(
+        GitTool.validateArgs('diff', ['main..HEAD', 'src/a.dart']),
+        isNull,
+      );
       expect(
         GitTool.validateArgs('diff', ['--', 'secrets/server.pem']),
         isNotNull,

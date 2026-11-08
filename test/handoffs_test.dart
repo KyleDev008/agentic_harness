@@ -516,6 +516,17 @@ void main() {
               .result;
       expect(done.agentName, 'Billing');
       expect(done.finalText, 'Billing here.');
+      // A spec that dropped the handoff can't silently skip it.
+      final withoutHandoff = AgentSpec(
+        name: 'Triage',
+        instructions: '',
+        model: spec.model,
+        tools: [refund],
+      );
+      expect(
+        () => const Runner().resume(withoutHandoff, saved.approve()),
+        throwsArgumentError,
+      );
     });
 
     test('the tool-call filter leaves a user turn last', () {

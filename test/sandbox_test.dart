@@ -241,6 +241,37 @@ void main() {
       );
     });
 
+    test('host paths are redacted in any case or separator on Windows', () {
+      final pattern = DockerSandbox.hostPathPattern(
+        r'C:\Work\App',
+        windows: true,
+      );
+      for (final seen in [
+        r'C:\Work\App\x',
+        r'c:\work\app\x',
+        'C:/Work/App/x',
+      ]) {
+        final redacted = seen.replaceAll(pattern, '/workspace');
+        expect(redacted, startsWith('/workspace'));
+        expect(redacted, isNot(contains('App')));
+        expect(redacted, isNot(contains('app')));
+      }
+      // A root given with a trailing separator still matches at line end.
+      final trailing = DockerSandbox.hostPathPattern(
+        r'C:\Work\App'
+        '\\',
+        windows: true,
+      );
+      expect(
+        r'at C:\work\app'.replaceAll(trailing, '/workspace'),
+        'at /workspace',
+      );
+      expect(
+        DockerSandbox.hostPathPattern('/home/u/app', windows: false),
+        '/home/u/app',
+      );
+    });
+
     test('settings are validated', () {
       DockerSandbox make({
         String image = 'node',
@@ -280,12 +311,10 @@ void main() {
         ).user,
         isNull,
       );
-      if (!Platform.isWindows) {
-        expect(
-          DockerSandbox(workspaceRoot: root.path, image: 'node').user,
-          matches(RegExp(r'^\d+:\d+$')),
-        );
-      }
+      expect(
+        DockerSandbox(workspaceRoot: root.path, image: 'node').user,
+        allOf(matches(RegExp(r'^\d+:\d+$')), isNot(startsWith('0:'))),
+      );
     });
 
     test('.git can be mounted read-only', () async {
