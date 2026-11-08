@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import '../core/cancellation.dart';
 import '../core/errors.dart';
 import '../model/http_transport.dart';
+import 'mcp_oauth.dart';
 
 /// A JSON-RPC error returned by an MCP server.
 final class McpError implements Exception {
@@ -137,6 +138,11 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
   /// because the host may resolve differently later.
   final FutureOr<void> Function(Uri endpoint)? endpointGuard;
 
+  /// Called on a 401, or a 403 with `error="insufficient_scope"`, with the
+  /// server's challenge; returning true retries the request once (with
+  /// fresh [headerProvider] headers). Pass `McpOAuth.handleChallenge`.
+  final Future<bool> Function(McpAuthChallenge challenge)? onUnauthorized;
+
   final http.Client _client;
   final bool _ownsClient;
   String? _sessionId;
@@ -156,6 +162,7 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
     this.maxResponseBytes = 4 * 1024 * 1024,
     this.maxStreamBytes = 32 * 1024 * 1024,
     this.endpointGuard,
+    this.onUnauthorized,
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null {
     if (endpoint.scheme != 'https' && endpoint.scheme != 'http') {
@@ -274,6 +281,33 @@ class McpHttpTransport implements McpTransport, McpNotificationSource {
     String? protocolVersion,
     Completer<void> abort, {
     String method = 'POST',
+  }) async {
+    final response = await _send(
+      message,
+      protocolVersion,
+      abort,
+      method: method,
+    );
+    final handler = onUnauthorized;
+    final status = response.statusCode;
+    if (handler == null || (status != 401 && status != 403)) return response;
+    final challenge = McpAuthChallenge.parse(
+      status,
+      response.headers['www-authenticate'],
+    );
+    if (status == 403 && !challenge.insufficientScope) return response;
+    await response.stream.drain<void>().catchError((Object _) {});
+    if (!await handler(challenge)) {
+      throw errorFromStatus(status, '', response.headers);
+    }
+    return _send(message, protocolVersion, abort, method: method);
+  }
+
+  Future<http.StreamedResponse> _send(
+    Map<String, Object?> message,
+    String? protocolVersion,
+    Completer<void> abort, {
+    required String method,
   }) async {
     if (endpointGuard case final guard?) {
       try {

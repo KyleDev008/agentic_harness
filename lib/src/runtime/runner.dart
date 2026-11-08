@@ -187,6 +187,42 @@ class Runner {
     scheduleMicrotask(run._start);
     return run;
   }
+
+  /// Cancels the background tasks a paused run left running (see
+  /// `RunConfig.keepBackgroundOnPause`), for a run that won't be resumed.
+  /// Returns how many were cancelled.
+  static int releaseBackground(String runId) =>
+      _parkedBackground.remove(runId)?.cancel() ?? 0;
+}
+
+/// Background tasks of paused runs in this process, by run id, until the
+/// run resumes or `RunConfig.keepBackgroundOnPause` runs out.
+final Map<String, _ParkedBackground> _parkedBackground = {};
+
+final class _ParkedBackground {
+  /// Runs whose cost the tasks' spending lands in, with how much of each
+  /// is already counted in the paused run's cost.
+  final Map<_AgentRunImpl, double> costSources;
+  final List<_BackgroundTask> tasks;
+
+  /// Also stored in the paused state: only that state can take the tasks
+  /// over, not another state that reuses the run id.
+  final String key;
+  Timer? expiry;
+
+  _ParkedBackground(this.costSources, this.tasks, this.key);
+
+  int cancel() {
+    expiry?.cancel();
+    var cancelled = 0;
+    for (final t in tasks) {
+      if (!t.finished) {
+        t.cancel.cancel('The paused run was not resumed in time');
+        cancelled++;
+      }
+    }
+    return cancelled;
+  }
 }
 
 /// Thrown inside a run to stop it at an interruption.
@@ -236,6 +272,15 @@ class _AgentRunImpl implements AgentRun {
 
   /// Labels of tasks a pause or restart stopped, to tell the model about.
   final List<String> _lostBackground = [];
+
+  /// Runs whose cost taken-over tasks charge (the run that started each
+  /// task), with how much of it this run already counts; moved here by
+  /// [_syncAdoptedCost].
+  final Map<_AgentRunImpl, double> _costSources = {};
+
+  /// Key of tasks this run left running at its pause (see
+  /// [_ParkedBackground.key]).
+  String? _parkKey;
   final RunConfig config;
   final CancelToken _cancel;
   final List<ToolUseBlock> initialToolCalls;
@@ -368,6 +413,7 @@ class _AgentRunImpl implements AgentRun {
       }
       _lostBackground.addAll(state._lostBackground);
       _loadedTools.addAll(state._loadedTools);
+      _restoreBackground(state);
     }
     _cancel.onCancel(() {
       final c = _pendingInputCompleter;
@@ -480,7 +526,26 @@ class _AgentRunImpl implements AgentRun {
       }
     } finally {
       _active.stop();
-      await _cancelBackground();
+      // Before parking: the parked baseline is this run's final cost.
+      _syncAdoptedCost();
+      if (stop == StopReason.interrupted &&
+          config.keepBackgroundOnPause > Duration.zero) {
+        _parkBackground();
+      } else {
+        if (stop == StopReason.interrupted) {
+          // Stopped by the pause, not failed: the model is told they were
+          // lost and may start them again.
+          for (final t in [..._background.values]) {
+            if (!t.finished) {
+              _lostBackground.add(t.label);
+              _background.remove(t.id);
+              t.cancel.cancel('The run paused');
+            }
+          }
+        }
+        await _cancelBackground();
+        _syncAdoptedCost();
+      }
       _ledger.close();
       if (stop != StopReason.interrupted) _closeDanglingToolUses();
     }
@@ -620,10 +685,18 @@ class _AgentRunImpl implements AgentRun {
     handoffs: _handoffs,
     pendingHandoff: _pendingHandoff?.agent.name,
     loadedTools: List.unmodifiable(_loadedTools),
-    lostBackground: [
-      ..._lostBackground,
+    lostBackground: List.unmodifiable(_lostBackground),
+    backgroundKey: _parkKey,
+    background: [
       for (final t in _background.values)
-        if (!t.delivered) t.label,
+        if (!t.delivered)
+          _SavedBackground(
+            id: t.id,
+            label: t.label,
+            running: !t.finished,
+            failed: t.failed,
+            result: t.finished ? t.result : null,
+          ),
     ],
     messages: List.unmodifiable(_working),
     newMessages: List.unmodifiable(_produced),
@@ -1036,7 +1109,8 @@ class _AgentRunImpl implements AgentRun {
         'once; wait for one to finish.',
       );
     }
-    final task = _BackgroundTask(newId('task'), label, _cancel.child());
+    final task = _BackgroundTask(newId('task'), label, _cancel.child())
+      ..owner = this;
     _background[task.id] = task;
     _emit(BackgroundTaskStarted(id, taskId: task.id, label: label));
     task.done = Future(() => work(task.cancel))
@@ -1064,7 +1138,9 @@ class _AgentRunImpl implements AgentRun {
         )
         .whenComplete(() {
           task.finished = true;
-          _emit(
+          // The run in charge now: a resumed run takes over from a paused
+          // one, and a parked task has none until then.
+          task.owner?._emit(
             BackgroundTaskFinished(
               id,
               taskId: task.id,
@@ -1076,8 +1152,103 @@ class _AgentRunImpl implements AgentRun {
     return task.id;
   }
 
+  /// At a pause: leaves unfinished tasks running for
+  /// `RunConfig.keepBackgroundOnPause`, for `Runner.resume` to take over.
+  void _parkBackground() {
+    final running = [
+      for (final t in _background.values)
+        if (!t.finished) t,
+    ];
+    if (running.isEmpty) return;
+    for (final t in running) {
+      t.owner = null;
+    }
+    _parkedBackground.remove(id)?.cancel();
+    final parked = _ParkedBackground(
+      // This run's own tasks charge it from here on; adopted ones keep
+      // charging the run that started them.
+      {..._costSources, this: _cost},
+      running,
+      _parkKey = newId('park'),
+    );
+    parked.expiry = Timer(config.keepBackgroundOnPause, () {
+      if (identical(_parkedBackground[id], parked)) {
+        _parkedBackground.remove(id);
+      }
+      parked.cancel();
+    });
+    _parkedBackground[id] = parked;
+    // Once every task is done there is nothing left to stop: drop the
+    // timer (so it doesn't keep the process alive) and keep the results
+    // for the resume.
+    unawaited(
+      Future.wait([for (final t in running) t.done]).then((_) {
+        parked.expiry?.cancel();
+      }),
+    );
+  }
+
+  /// On resume: finished results from [state] wait to be delivered, and
+  /// tasks still running in this process are taken over. Others are lost.
+  void _restoreBackground(RunState state) {
+    final candidate = _parkedBackground[id];
+    final parked =
+        candidate != null && candidate.key == state._backgroundKey
+            ? candidate
+            : null;
+    if (parked != null) {
+      _parkedBackground.remove(id);
+      parked.expiry?.cancel();
+    }
+    final adopted = <String>{};
+    for (final saved in state._background) {
+      if (!saved.running) {
+        _background[saved.id] = _BackgroundTask.finished(
+          saved.id,
+          saved.label,
+          result: saved.result,
+          failed: saved.failed,
+        );
+        continue;
+      }
+      final task = parked?.tasks.where((t) => t.id == saved.id).firstOrNull;
+      if (task == null) {
+        _lostBackground.add(saved.label);
+        continue;
+      }
+      adopted.add(task.id);
+      task.owner = this;
+      _background[task.id] = task;
+      _cancel.onCancel(() => task.cancel.cancel(_cancel.reason));
+    }
+    if (parked != null) {
+      // Tasks the state doesn't mention (an older state resumed): stop them.
+      for (final t in parked.tasks) {
+        if (!adopted.contains(t.id) && !t.finished) {
+          t.cancel.cancel('The resumed run does not include this task');
+        }
+      }
+      // Counted as of the pause, so spending while paused moves here too.
+      if (adopted.isNotEmpty) _costSources.addAll(parked.costSources);
+    }
+  }
+
+  /// Moves spending by taken-over tasks from the runs that started them
+  /// to this one.
+  void _syncAdoptedCost() {
+    for (final entry in [..._costSources.entries]) {
+      final delta = entry.key._cost - entry.value;
+      if (delta <= 0 || !delta.isFinite) continue;
+      _costSources[entry.key] = entry.key._cost;
+      _cost += delta;
+      _costKnown = true;
+      _ledger.spend(delta);
+    }
+  }
+
   /// Adds finished background results to the transcript (once each).
   void _deliverBackground() {
+    _syncAdoptedCost();
     final ready = [
       for (final t in _background.values)
         if (t.finished && !t.delivered) t,
@@ -2382,7 +2553,22 @@ final class _BackgroundTask {
   bool failed = false;
   bool finished = false;
   bool delivered = false;
+
+  /// The run that reports this task's events; null while parked.
+  _AgentRunImpl? owner;
+
   _BackgroundTask(this.id, this.label, this.cancel);
+
+  /// A result saved in a [RunState] before the pause.
+  _BackgroundTask.finished(
+    this.id,
+    this.label, {
+    required this.result,
+    required this.failed,
+  }) : cancel = CancelToken(),
+       finished = true {
+    done = Future<void>.value();
+  }
 }
 
 /// The model-facing tool for one [Handoff].

@@ -33,6 +33,7 @@ export 'src/model/http_transport.dart'
 export 'src/model/model_client.dart';
 export 'src/model/tool_call_accumulator.dart';
 export 'src/mcp/mcp_client.dart';
+export 'src/mcp/mcp_oauth.dart';
 export 'src/mcp/mcp_toolset.dart';
 export 'src/mcp/mcp_transport.dart' hide headerValue;
 export 'src/providers/anthropic_client.dart';

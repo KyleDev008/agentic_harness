@@ -39,7 +39,7 @@ items:
           labels, required prefix, onToolsChanged). 22 tests.
     follow_ups:
       - Listen on a GET stream for notifications between requests (list_changed is handled when it arrives in a response stream or over stdio)
-      - OAuth 2.1 authorization flow (headerProvider covers static/refreshed tokens)
+      - Home Base sign-in UI for OAuth MCP servers (browser + loopback redirect) on McpOAuth
       - Resources, prompts and elicitation (input_required) support
       - Switch Home Base's MCP feature to McpToolset
       - Pin HTTP connections to the address endpointGuard checked (DNS rebinding)
@@ -213,7 +213,6 @@ items:
           shared down the run tree (reservations, fair shares, waiting for
           in-flight calls). 10 tests.
     follow_ups:
-      - Save background tasks in checkpoints / paused runs
       - Let background subagents ask the user (route questions to the parent)
     released_in: null
 

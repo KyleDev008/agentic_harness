@@ -675,7 +675,10 @@ void main() {
           refund,
         ],
       );
-      const config = RunConfig(interruptible: true);
+      const config = RunConfig(
+        interruptible: true,
+        keepBackgroundOnPause: Duration.zero,
+      );
       final first =
           await const Runner()
               .run(spec, input: AgentMessage.user('go'), config: config)
@@ -685,6 +688,178 @@ void main() {
           .resume(spec, first.state!.approve(), config: config)
           .result;
       expect(model.requests.last.messages.last.text, contains('were stopped'));
+    });
+  });
+
+  group('background tasks across a pause', () {
+    // A lead that starts a background researcher and pauses for a refund
+    // approval in the same turn.
+    (AgentSpec, FakeModelClient) setup(Duration childDelay) {
+      final refund = FunctionTool(
+        name: 'refund',
+        description: 'Refunds',
+        inputSchema: const {'type': 'object'},
+        run: (input, _) async => ToolOutput.text('refunded'),
+      );
+      final child = AgentSpec(
+        name: 'Researcher',
+        instructions: '',
+        model: FakeModelClient([FakeTurn(text: 'found it', delay: childDelay)]),
+      );
+      final model = FakeModelClient([
+        FakeTurn.tools([
+          const FakeToolCall('b', 'research', {'task': 'dig'}),
+          const FakeToolCall('r', 'refund', {}),
+        ]),
+        FakeTurn.text('done'),
+        FakeTurn.text('done again'),
+      ]);
+      return (
+        AgentSpec(
+          name: 'Lead',
+          instructions: '',
+          model: model,
+          tools: [
+            SubagentTool(
+              agent: child,
+              name: 'research',
+              description: 'R',
+              background: true,
+            ),
+            refund,
+          ],
+        ),
+        model,
+      );
+    }
+
+    const config = RunConfig(interruptible: true);
+
+    String delivered(FakeModelClient model) => [
+      for (final r in model.requests)
+        for (final m in r.messages) m.text,
+    ].join(' | ');
+
+    test('a task still running is taken over by the resumed run', () async {
+      final (spec, model) = setup(const Duration(milliseconds: 300));
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: config)
+              .result;
+      expect(first.stopReason, StopReason.interrupted);
+      final run = const Runner().resume(
+        spec,
+        first.state!.approve(),
+        config: config,
+      );
+      final events = run.events.toList();
+      final result = await run.result;
+      expect(result.stopReason, StopReason.endTurn);
+      expect(delivered(model), contains('found it'));
+      expect(delivered(model), isNot(contains('were stopped')));
+      expect((await events).whereType<BackgroundTaskFinished>(), hasLength(1));
+    });
+
+    test('a taken-over task\'s spending counts in the resumed run', () async {
+      final (spec, model) = setup(const Duration(milliseconds: 300));
+      // $10 per fake call (10 input tokens each).
+      const priced = RunConfig(
+        interruptible: true,
+        pricing: PricingTable(
+          {},
+          fallback: ModelPricing(inputPerMillion: 1000000, outputPerMillion: 0),
+        ),
+      );
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: priced)
+              .result;
+      final second =
+          await const Runner()
+              .resume(spec, first.state!.approve(), config: priced)
+              .result;
+      // Every lead call plus the researcher's one call.
+      expect(second.cost, closeTo((model.requests.length + 1) * 10, 1e-9));
+    });
+
+    test('spending while the run is paused is counted too', () async {
+      final (spec, model) = setup(const Duration(milliseconds: 100));
+      const priced = RunConfig(
+        interruptible: true,
+        pricing: PricingTable(
+          {},
+          fallback: ModelPricing(inputPerMillion: 1000000, outputPerMillion: 0),
+        ),
+      );
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: priced)
+              .result;
+      // The researcher finishes (and spends) before the user approves.
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      final second =
+          await const Runner()
+              .resume(spec, first.state!.approve(), config: priced)
+              .result;
+      expect(delivered(model), contains('found it'));
+      expect(second.cost, closeTo((model.requests.length + 1) * 10, 1e-9));
+    });
+
+    test('another state with the same run id cannot take the tasks', () async {
+      final (spec, model) = setup(const Duration(milliseconds: 300));
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: config)
+              .result;
+      final json =
+          jsonDecode(jsonEncode(first.state!.toJson())) as Map<String, Object?>;
+      expect(json['backgroundKey'], isA<String>());
+      final forged = Map.of(json)..['backgroundKey'] = 'park_guess';
+      await const Runner()
+          .resume(spec, RunState.fromJson(forged).approve(), config: config)
+          .result;
+      expect(delivered(model), contains('were stopped'));
+      // The real state still can.
+      expect(Runner.releaseBackground(first.state!.runId), 1);
+    });
+
+    test('a saved finished result is delivered after resume', () async {
+      final (spec, model) = setup(const Duration(seconds: 5));
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: config)
+              .result;
+      Runner.releaseBackground(first.state!.runId);
+      // As if the task had finished before the pause was stored.
+      final json =
+          jsonDecode(jsonEncode(first.state!.toJson())) as Map<String, Object?>;
+      final task = (json['background'] as List).single as Map;
+      expect(task['status'], 'running');
+      task['status'] = 'done';
+      task['result'] = 'saved answer';
+      await const Runner()
+          .resume(spec, RunState.fromJson(json).approve(), config: config)
+          .result;
+      expect(delivered(model), contains('saved answer'));
+      expect(delivered(model), isNot(contains('were stopped')));
+    });
+
+    test('a task not taken over in time is reported as lost', () async {
+      final (spec, model) = setup(const Duration(seconds: 5));
+      final first =
+          await const Runner()
+              .run(spec, input: AgentMessage.user('go'), config: config)
+              .result;
+      // Another process: only the stored state is available.
+      final restored = RunState.fromJson(
+        jsonDecode(jsonEncode(first.state!.toJson())) as Map<String, Object?>,
+      );
+      expect(Runner.releaseBackground(first.state!.runId), 1);
+      await const Runner()
+          .resume(spec, restored.approve(), config: config)
+          .result;
+      expect(delivered(model), contains('were stopped'));
+      expect(delivered(model), isNot(contains('found it')));
     });
   });
 

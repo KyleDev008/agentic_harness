@@ -253,6 +253,14 @@ final class RunConfig {
   /// Longest background result passed to the model; the rest is cut.
   final int maxBackgroundResultChars;
 
+  /// How long background tasks keep running after the run pauses at an
+  /// interruption, waiting for `Runner.resume` in this process to take
+  /// them over. Past it they are cancelled, and the resumed run tells the
+  /// model they were lost. `Duration.zero` cancels them at the pause.
+  /// Results that finished before the pause are kept in the [RunState]
+  /// either way. `Runner.releaseBackground` stops them early.
+  final Duration keepBackgroundOnPause;
+
   /// Most deferred tools `search_tools` may load in one run.
   final int maxLoadedTools;
 
@@ -280,6 +288,7 @@ final class RunConfig {
     this.maxSubagentDepth = 3,
     this.backgroundTaskTimeout = const Duration(minutes: 15),
     this.maxBackgroundResultChars = 20000,
+    this.keepBackgroundOnPause = const Duration(minutes: 10),
     this.maxLoadedTools = 40,
   });
 }

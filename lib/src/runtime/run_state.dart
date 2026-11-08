@@ -187,6 +187,13 @@ final class RunState {
   /// Background tasks the pause or restart stopped (their labels).
   final List<String> _lostBackground;
 
+  /// Background tasks not yet delivered to the model: finished ones with
+  /// their result, running ones to take over on resume.
+  final List<_SavedBackground> _background;
+
+  /// Key for taking over tasks left running in this process.
+  final String? _backgroundKey;
+
   /// Deferred tools loaded by search.
   final List<String> _loadedTools;
 
@@ -221,8 +228,12 @@ final class RunState {
     int handoffs = 0,
     String? pendingHandoff,
     List<String> lostBackground = const [],
+    List<_SavedBackground> background = const [],
+    String? backgroundKey,
     List<String> loadedTools = const [],
   }) : _traceId = traceId,
+       _background = background,
+       _backgroundKey = backgroundKey,
        _loadedTools = loadedTools,
        _activeAgent = activeAgent,
        _handoffs = handoffs,
@@ -296,6 +307,8 @@ final class RunState {
     handoffs: _handoffs,
     pendingHandoff: _pendingHandoff,
     lostBackground: _lostBackground,
+    background: _background,
+    backgroundKey: _backgroundKey,
     loadedTools: _loadedTools,
   );
 
@@ -321,6 +334,9 @@ final class RunState {
     if (_handoffs > 0) 'handoffs': _handoffs,
     if (_pendingHandoff != null) 'pendingHandoff': _pendingHandoff,
     if (_lostBackground.isNotEmpty) 'lostBackground': _lostBackground,
+    if (_background.isNotEmpty)
+      'background': [for (final b in _background) b.toJson()],
+    if (_backgroundKey != null) 'backgroundKey': _backgroundKey,
     if (_loadedTools.isNotEmpty) 'loadedTools': _loadedTools,
   };
 
@@ -461,6 +477,11 @@ final class RunState {
             for (final l in labels.take(64))
               if (l is String) l.length <= 200 ? l : l.substring(0, 200),
         ],
+        background: _SavedBackground.listFromJson(json['background']),
+        backgroundKey: switch (json['backgroundKey']) {
+          final String k when k.length <= 64 => k,
+          _ => null,
+        },
       );
     } on FormatException {
       rethrow;
@@ -468,6 +489,96 @@ final class RunState {
       // Type errors from malformed nested values.
       throw FormatException('Invalid run state: ${e.runtimeType}');
     }
+  }
+}
+
+/// A background task in a [RunState]: finished with its [result], or
+/// still [running] when the run paused.
+final class _SavedBackground {
+  final String id;
+  final String label;
+  final bool running;
+  final bool failed;
+  final String? result;
+
+  const _SavedBackground({
+    required this.id,
+    required this.label,
+    required this.running,
+    required this.failed,
+    required this.result,
+  });
+
+  /// Longest result kept, so a stored state stays bounded.
+  static const maxResultChars = 100000;
+
+  /// Most result text kept across all tasks.
+  static const maxTotalChars = 256 * 1024;
+
+  /// Valid entries of [json], first of each id, within the caps.
+  static List<_SavedBackground> listFromJson(Object? json) {
+    if (json is! List) return const [];
+    final out = <_SavedBackground>[];
+    final ids = <String>{};
+    var total = 0;
+    for (final t in json.take(64)) {
+      if (t is! Map) continue;
+      var saved = fromJson(t);
+      if (saved == null || !ids.add(saved.id)) continue;
+      final result = saved.result;
+      if (result != null) {
+        final room = maxTotalChars - total;
+        if (room <= 0) continue;
+        if (result.length > room) {
+          saved = _SavedBackground(
+            id: saved.id,
+            label: saved.label,
+            running: saved.running,
+            failed: saved.failed,
+            result: result.substring(0, room),
+          );
+        }
+        total += saved.result!.length;
+      }
+      out.add(saved);
+    }
+    return out;
+  }
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'label': label,
+    'status':
+        running
+            ? 'running'
+            : failed
+            ? 'failed'
+            : 'done',
+    if (result != null) 'result': result,
+  };
+
+  static _SavedBackground? fromJson(Map<Object?, Object?> json) {
+    final id = json['id'];
+    final label = json['label'];
+    final status = json['status'];
+    if (id is! String || id.isEmpty || id.length > 100) return null;
+    if (label is! String) return null;
+    if (status != 'running' && status != 'failed' && status != 'done') {
+      return null;
+    }
+    final result = json['result'];
+    return _SavedBackground(
+      id: id,
+      label: label.length <= 200 ? label : label.substring(0, 200),
+      running: status == 'running',
+      failed: status == 'failed',
+      result:
+          result is String
+              ? (result.length <= maxResultChars
+                  ? result
+                  : result.substring(0, maxResultChars))
+              : null,
+    );
   }
 }
 
