@@ -1,0 +1,19 @@
+# Publishes to pub.dev when a version tag (v1.2.3) is pushed, usually by release.yml after
+# a version-bump PR is merged. Signs in with GitHub's OIDC token: no pub.dev credentials
+# are stored. On pub.dev (Admin > Automated publishing) the repository is
+# KyleDev008/agentic_harness, the tag pattern v{{version}} and the required environment
+# pub.dev, which on GitHub only accepts v* tags.
+name: Publish to pub.dev
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  publish:
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      environment: pub.dev
