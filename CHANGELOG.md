@@ -7,7 +7,7 @@ types arrive only in major versions.
 
 Full documentation: [projects.kylecox.co.za/agentic_harness/docs](https://projects.kylecox.co.za/agentic_harness/docs/).
 
-## Unreleased
+## 2.1.0 - 2026-11-09
 
 ### Added
 

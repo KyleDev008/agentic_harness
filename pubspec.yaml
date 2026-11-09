@@ -3,7 +3,7 @@ description: >-
   Pure Dart agent harness: a native tool-use loop over OpenAI-compatible,
   Anthropic, Ollama and Gemini models, with tools, permissions and one event
   stream.
-version: 2.0.1
+version: 2.1.0
 homepage: https://projects.kylecox.co.za/agentic_harness/
 documentation: https://projects.kylecox.co.za/agentic_harness/docs/
 repository: https://github.com/KyleDev008/agentic_harness
